@@ -1,7 +1,7 @@
 # Phase 2 Report — Hierarchical Bayesian Logistic Regression Across 3 Stations, lead 24h
 
 **Date:** 2026-04-25
-**Author:** Claude Code (initial pass) for Russell
+**Author:** Claude Code (initial pass) for Harry
 
 ## What we built
 

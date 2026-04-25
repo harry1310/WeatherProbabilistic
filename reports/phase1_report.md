@@ -1,7 +1,7 @@
 # Phase 1 Report — Bayesian Logistic Regression for P(wet) at Bellever, lead 24h
 
 **Date:** 2026-04-24
-**Author:** Claude Code (initial pass) for Russell
+**Author:** Claude Code (initial pass) for Harry
 
 ## What we built
 
