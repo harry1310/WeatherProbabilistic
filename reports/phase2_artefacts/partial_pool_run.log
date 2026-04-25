@@ -1,0 +1,103 @@
+WARNING (pytensor.configdefaults): g++ not available, if using conda: `conda install gxx`
+==============================================================================
+Phase 2: Hierarchical Bayesian logistic regression across 3 stations
+==============================================================================
+Loading forecasts: ecmwf_ifs025...
+Loading forecasts: gem_seamless...
+Loading forecasts: gfs_seamless...
+Loading forecasts: icon_seamless...
+Loading forecasts: meteofrance_seamless...
+Loading forecasts: ukmo_seamless...
+
+Loading rainfall truth: Bellever Dartmoor
+  truth rows: 15,325  wet fraction: 0.241
+  drop rows with any null precip_*: 14,511 -> 10,117
+  prob_ecmwf_ifs025: null_frac=1.000  [drop]
+  prob_gem_seamless: null_frac=1.000  [drop]
+  prob_gfs_seamless: null_frac=1.000  [drop]
+  prob_icon_seamless: null_frac=1.000  [drop]
+  prob_meteofrance_seamless: null_frac=1.000  [drop]
+  prob_ukmo_seamless: null_frac=1.000  [drop]
+  Bellever: train 8,093 (2024-08-06 00:00:00 -> 2025-07-17 02:00:00)  test 2,024 (2025-07-17 03:00:00 -> 2025-10-09 10:00:00)  wet train=0.202 test=0.216
+
+Loading rainfall truth: Princetown
+  truth rows: 15,311  wet fraction: 0.251
+  drop rows with any null precip_*: 14,940 -> 12,566
+  prob_ecmwf_ifs025: null_frac=1.000  [drop]
+  prob_gem_seamless: null_frac=1.000  [drop]
+  prob_gfs_seamless: null_frac=1.000  [drop]
+  prob_icon_seamless: null_frac=1.000  [drop]
+  prob_meteofrance_seamless: null_frac=1.000  [drop]
+  prob_ukmo_seamless: null_frac=1.000  [drop]
+  Princetown: train 10,052 (2024-08-06 00:00:00 -> 2025-09-29 10:00:00)  test 2,514 (2025-09-29 11:00:00 -> 2026-01-29 15:00:00)  wet train=0.200 test=0.314
+
+Loading rainfall truth: Dartmoor nr Hexworthy
+  truth rows: 15,348  wet fraction: 0.258
+  drop rows with any null precip_*: 14,540 -> 10,123
+  prob_ecmwf_ifs025: null_frac=1.000  [drop]
+  prob_gem_seamless: null_frac=1.000  [drop]
+  prob_gfs_seamless: null_frac=1.000  [drop]
+  prob_icon_seamless: null_frac=1.000  [drop]
+  prob_meteofrance_seamless: null_frac=1.000  [drop]
+  prob_ukmo_seamless: null_frac=1.000  [drop]
+  Hexworthy: train 8,098 (2024-08-06 00:00:00 -> 2025-07-17 03:00:00)  test 2,025 (2025-07-17 04:00:00 -> 2025-10-09 12:00:00)  wet train=0.236 test=0.247
+
+Combined: train 26,243  test 6,563  features 8
+  Bellever: train=8,093  test=2,024
+  Princetown: train=10,052  test=2,514
+  Hexworthy: train=8,098  test=2,025
+
+--- Model B: Full pooling ---
+  loading saved posterior from full_pooling_posterior.nc (skip refit)
+  rhat=1.000  ess=11136  div=0
+
+--- Model A: No pooling (3 separate fits) ---
+  loading saved per-station posteriors (skip refit)
+  Bellever: rhat=1.000  ess=10840  div=0
+  Princetown: rhat=1.000  ess=10585  div=0
+  Hexworthy: rhat=1.000  ess=11743  div=0
+
+--- Model C: Partial pooling (hierarchical, non-centred) ---
+  rhat=1.000  ess=1670  div=59
+
+--- Per-station test Brier (lower is better) ---
+   station  no_pooling  full_pooling  partial_pooling
+  Bellever    0.121637      0.122394         0.121637
+Princetown    0.159085      0.157428         0.159049
+ Hexworthy    0.140617      0.143941         0.140493
+
+--- Per-station test log loss ---
+   station  no_pooling  full_pooling  partial_pooling
+  Bellever    0.410107      0.407706         0.409544
+Princetown    0.507870      0.517564         0.508216
+ Hexworthy    0.452242      0.458085         0.451678
+
+--- Calibration (predicted vs observed wet fraction) ---
+   station      obs  no_pool_pred  full_pool_pred  partial_pool_pred
+  Bellever 0.215909      0.190888        0.201240           0.190920
+Princetown 0.313842      0.280648        0.298054           0.281300
+ Hexworthy 0.247407      0.226367        0.201166           0.225612
+
+--- Hyperparameter posteriors (partial pooling) ---
+  sigma_intercept   mean=0.287  sd=0.175  94% CI [0.095, 0.729]
+
+Between-station SD per feature (sigma_beta):
+                    feature  sigma_mean  sigma_sd  sigma_lo94  sigma_hi94
+        precip_gem_seamless    0.385322  0.203675    0.137476    0.874890
+precip_meteofrance_seamless    0.191211  0.163427    0.016150    0.605589
+        precip_ecmwf_ifs025    0.184594  0.163923    0.010647    0.608759
+       precip_ukmo_seamless    0.163949  0.152010    0.008781    0.563084
+                   hour_cos    0.142482  0.130289    0.018292    0.495141
+                   hour_sin    0.133247  0.130468    0.012334    0.489841
+       precip_icon_seamless    0.117296  0.137406    0.003206    0.470400
+        precip_gfs_seamless    0.099831  0.119801    0.003010    0.422544
+
+  mu_intercept    mean=-1.230  sd=0.187
+
+--- Phase 1 sanity check (Bellever only) ---
+  phase 1 Brier        0.1217
+  phase 2 no-pool Brier 0.1216
+  phase 2 partial Brier 0.1216
+
+Artefacts in: C:\Projects\Weather\WeatherProbabilistic\reports\phase2_artefacts
+Run complete.

@@ -1,0 +1,250 @@
+{
+  "n_train_total": 26243,
+  "n_test_total": 6563,
+  "feature_names": [
+    "precip_ecmwf_ifs025",
+    "precip_gem_seamless",
+    "precip_gfs_seamless",
+    "precip_icon_seamless",
+    "precip_meteofrance_seamless",
+    "precip_ukmo_seamless",
+    "hour_sin",
+    "hour_cos"
+  ],
+  "station_codes": [
+    "Bellever",
+    "Princetown",
+    "Hexworthy"
+  ],
+  "n_train_per_station": {
+    "Bellever": 8093,
+    "Princetown": 10052,
+    "Hexworthy": 8098
+  },
+  "n_test_per_station": {
+    "Bellever": 2024,
+    "Princetown": 2514,
+    "Hexworthy": 2025
+  },
+  "wet_fraction_train": {
+    "Bellever": 0.20215000617817866,
+    "Princetown": 0.20035813768404298,
+    "Hexworthy": 0.23610768090886639
+  },
+  "wet_fraction_test": {
+    "Bellever": 0.2159090909090909,
+    "Princetown": 0.3138424821002387,
+    "Hexworthy": 0.2474074074074074
+  },
+  "diagnostics": [
+    {
+      "model": "full_pooling",
+      "max_rhat": 1.0,
+      "min_ess_bulk": 11136.0,
+      "n_divergences": 0,
+      "issues": []
+    },
+    {
+      "model": "no_pooling",
+      "max_rhat": 1.0,
+      "min_ess_bulk": 10585.0,
+      "n_divergences": 0,
+      "issues": []
+    },
+    {
+      "model": "partial_pooling",
+      "max_rhat": 1.0,
+      "min_ess_bulk": 1670.0,
+      "n_divergences": 59,
+      "issues": [
+        "59 divergent transition(s)"
+      ]
+    }
+  ],
+  "headline_brier": [
+    {
+      "station": "Bellever",
+      "no_pooling": 0.12163726241363625,
+      "full_pooling": 0.12239421053934835,
+      "partial_pooling": 0.12163678608505293
+    },
+    {
+      "station": "Princetown",
+      "no_pooling": 0.15908515818720098,
+      "full_pooling": 0.15742830874328653,
+      "partial_pooling": 0.15904937280261344
+    },
+    {
+      "station": "Hexworthy",
+      "no_pooling": 0.14061651498750213,
+      "full_pooling": 0.14394075762080474,
+      "partial_pooling": 0.14049326001467438
+    }
+  ],
+  "headline_logloss": [
+    {
+      "station": "Bellever",
+      "no_pooling": 0.41010678142853735,
+      "full_pooling": 0.4077061173135073,
+      "partial_pooling": 0.4095436663984331
+    },
+    {
+      "station": "Princetown",
+      "no_pooling": 0.5078695257895318,
+      "full_pooling": 0.5175639237913504,
+      "partial_pooling": 0.508215839088745
+    },
+    {
+      "station": "Hexworthy",
+      "no_pooling": 0.45224185553156593,
+      "full_pooling": 0.4580850567868223,
+      "partial_pooling": 0.4516783465673397
+    }
+  ],
+  "calibration": [
+    {
+      "station": "Bellever",
+      "obs": 0.2159090909090909,
+      "no_pool_pred": 0.19088819293846432,
+      "full_pool_pred": 0.20124048759543756,
+      "partial_pool_pred": 0.19091958622808614
+    },
+    {
+      "station": "Princetown",
+      "obs": 0.3138424821002387,
+      "no_pool_pred": 0.2806478230264327,
+      "full_pool_pred": 0.2980537975822231,
+      "partial_pool_pred": 0.2812998484348171
+    },
+    {
+      "station": "Hexworthy",
+      "obs": 0.2474074074074074,
+      "no_pool_pred": 0.2263671789953025,
+      "full_pool_pred": 0.2011656883595562,
+      "partial_pool_pred": 0.22561212876666312
+    }
+  ],
+  "sigma_beta": [
+    {
+      "feature": "precip_gem_seamless",
+      "sigma_mean": 0.38532167984633836,
+      "sigma_sd": 0.2036745647593034,
+      "sigma_lo94": 0.13747604396171648,
+      "sigma_hi94": 0.8748895573101471
+    },
+    {
+      "feature": "precip_meteofrance_seamless",
+      "sigma_mean": 0.191211349307228,
+      "sigma_sd": 0.16342654533194487,
+      "sigma_lo94": 0.016149736857399878,
+      "sigma_hi94": 0.6055887135253286
+    },
+    {
+      "feature": "precip_ecmwf_ifs025",
+      "sigma_mean": 0.18459433061424987,
+      "sigma_sd": 0.1639230204977349,
+      "sigma_lo94": 0.010646785453387703,
+      "sigma_hi94": 0.6087593887559669
+    },
+    {
+      "feature": "precip_ukmo_seamless",
+      "sigma_mean": 0.16394946657852197,
+      "sigma_sd": 0.1520095358631862,
+      "sigma_lo94": 0.008780717518516884,
+      "sigma_hi94": 0.5630842556321366
+    },
+    {
+      "feature": "hour_cos",
+      "sigma_mean": 0.14248233500924806,
+      "sigma_sd": 0.13028882296062344,
+      "sigma_lo94": 0.018291704308018034,
+      "sigma_hi94": 0.49514101998176224
+    },
+    {
+      "feature": "hour_sin",
+      "sigma_mean": 0.13324691963667726,
+      "sigma_sd": 0.13046795471879563,
+      "sigma_lo94": 0.012333989244493495,
+      "sigma_hi94": 0.48984093834735076
+    },
+    {
+      "feature": "precip_icon_seamless",
+      "sigma_mean": 0.11729594391589863,
+      "sigma_sd": 0.13740587920814853,
+      "sigma_lo94": 0.0032059313729003265,
+      "sigma_hi94": 0.47040008230532737
+    },
+    {
+      "feature": "precip_gfs_seamless",
+      "sigma_mean": 0.09983148590058083,
+      "sigma_sd": 0.11980063842676544,
+      "sigma_lo94": 0.003009598925930754,
+      "sigma_hi94": 0.42254353325519545
+    }
+  ],
+  "mu_beta": [
+    {
+      "feature": "precip_ecmwf_ifs025",
+      "mu_mean": 0.9970468156328982,
+      "mu_sd": 0.1430891099967032,
+      "mu_lo94": 0.682508430010137,
+      "mu_hi94": 1.2495800340603571
+    },
+    {
+      "feature": "precip_gem_seamless",
+      "mu_mean": 0.8389402000332353,
+      "mu_sd": 0.24407703623147986,
+      "mu_lo94": 0.31123768872694213,
+      "mu_hi94": 1.267726619520185
+    },
+    {
+      "feature": "precip_gfs_seamless",
+      "mu_mean": -0.0017440762105905222,
+      "mu_sd": 0.08967524609918283,
+      "mu_lo94": -0.1729362691331469,
+      "mu_hi94": 0.1625040988320329
+    },
+    {
+      "feature": "precip_icon_seamless",
+      "mu_mean": 0.211208948559257,
+      "mu_sd": 0.10926730038110159,
+      "mu_lo94": 0.015652295281068717,
+      "mu_hi94": 0.40404408604568526
+    },
+    {
+      "feature": "precip_meteofrance_seamless",
+      "mu_mean": 0.35838386487887164,
+      "mu_sd": 0.14411338265938087,
+      "mu_lo94": 0.07547695020112408,
+      "mu_hi94": 0.630354243441598
+    },
+    {
+      "feature": "precip_ukmo_seamless",
+      "mu_mean": 0.36985579989964107,
+      "mu_sd": 0.12520972096308194,
+      "mu_lo94": 0.12860203548330237,
+      "mu_hi94": 0.6068278733119143
+    },
+    {
+      "feature": "hour_sin",
+      "mu_mean": 0.14089313261419925,
+      "mu_sd": 0.09706217307984367,
+      "mu_lo94": -0.058972775474020446,
+      "mu_hi94": 0.33401895993585606
+    },
+    {
+      "feature": "hour_cos",
+      "mu_mean": 0.1526989955016745,
+      "mu_sd": 0.09720985097864741,
+      "mu_lo94": -0.04572555903902433,
+      "mu_hi94": 0.33759556664571605
+    }
+  ],
+  "sigma_intercept_mean": 0.28724456997196324,
+  "sigma_intercept_sd": 0.1748122514881653,
+  "mu_intercept_mean": -1.2304157815642953,
+  "mu_intercept_sd": 0.1868049676438984,
+  "phase1_bellever_brier": 0.12165417586921283,
+  "phase2_bellever_no_pool_brier": 0.12163726241363625,
+  "phase2_bellever_partial_pool_brier": 0.12163678608505293
+}

@@ -1,16 +1,21 @@
-"""Phase 1 data loader.
+"""Phase 1 + Phase 2 data loaders.
 
-Assembles a single pandas DataFrame for Bellever Dartmoor at lead 24h:
+Phase 1 loader: single station (Bellever Dartmoor), lead 24h.
+Phase 2 loader: three stations (Bellever, Princetown, Dartmoor nr
+Hexworthy) at the same forecast grid point, lead 24h.
 
-- One row per ValidTimeUtc where all six NWP models have a 24h forecast
-  and EA rainfall truth is available.
-- Target `observed_wet`: 1 if the observed Bellever hourly rainfall
-  (aggregated from 15-min EA readings) is >= 0.1 mm, else 0.
-- Features: per-model Precipitation (mm/h) and PrecipitationProbability
-  (%) at lead 24h, plus cyclical hour-of-day encoding.
+Both reuse the WeatherBlend parquet tree at
+`C:/Projects/Weather/WeatherBlend/data/`. We deliberately do not set up
+a new ingestion pipeline.
 
-Data source is the existing WeatherBlend parquet tree. We deliberately
-reuse it rather than setting up a new ingestion pipeline.
+Per-station chronological 80/20 split for Phase 2
+-------------------------------------------------
+The brief says "earliest 80% / latest 20%" - with three stations a
+single global chronological cut could under-represent a station in the
+test set if its data starts later (which doesn't happen here, but the
+principle holds). We split each station chronologically then concatenate,
+which keeps station representation balanced in train and test and makes
+per-station test metrics directly comparable.
 """
 
 from __future__ import annotations
@@ -20,13 +25,14 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from sklearn.preprocessing import StandardScaler
 
 
 WEATHERBLEND_DATA_ROOT = Path(r"C:/Projects/Weather/WeatherBlend/data")
 
 # These six models have ~2 years of backfill in the WeatherBlend tree.
 # Other models (ecmwf_hres_wb2, gfs_ncep, met_office_spot) have only a
-# handful of files and are excluded from Phase 1.
+# handful of files and are excluded from Phase 1 / 2.
 MODELS: tuple[str, ...] = (
     "ecmwf_ifs025",
     "gem_seamless",
@@ -37,16 +43,26 @@ MODELS: tuple[str, ...] = (
 )
 
 LOCATION = "bonehill_rocks"
-STATION = "Bellever Dartmoor"
+
+# Station identifiers as they appear in the WeatherBlend `station=` parquet
+# partitions, paired with short codes used in plots and tables.
+STATIONS: tuple[tuple[str, str], ...] = (
+    ("Bellever Dartmoor", "Bellever"),
+    ("Princetown", "Princetown"),
+    ("Dartmoor nr Hexworthy", "Hexworthy"),
+)
+
 LEAD_HOURS = 24
 WET_THRESHOLD_MM = 0.1
 MAX_NULL_FRACTION = 0.5  # drop any feature column that is more than half null
 
 
+# ---------------------------------------------------------------------------
+# Phase 1 dataset (single station)
+# ---------------------------------------------------------------------------
+
 @dataclass
 class Phase1Dataset:
-    """Container for the prepared train/test split."""
-
     X_train: pd.DataFrame
     X_test: pd.DataFrame
     y_train: pd.Series
@@ -55,6 +71,42 @@ class Phase1Dataset:
     valid_time_test: pd.Series
     feature_names: list[str]
 
+
+# ---------------------------------------------------------------------------
+# Phase 2 dataset (three stations)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Phase2Dataset:
+    """Multi-station dataset with pooled standardisation already applied.
+
+    `X_train_s` and `X_test_s` are standardised on the *combined* training
+    set across all three stations (per-station standardisation would leak
+    information and isn't appropriate for hierarchical fitting).
+    """
+
+    # Unstandardised features (handy for inspection / re-scaling)
+    X_train: pd.DataFrame
+    X_test: pd.DataFrame
+    # Standardised feature matrices (numpy float64) - what models actually use
+    X_train_s: np.ndarray
+    X_test_s: np.ndarray
+    y_train: pd.Series
+    y_test: pd.Series
+    # Integer station code per row (0..n_stations-1, aligned with `station_codes`)
+    station_idx_train: np.ndarray
+    station_idx_test: np.ndarray
+    valid_time_train: pd.Series
+    valid_time_test: pd.Series
+    feature_names: list[str]
+    station_codes: list[str]  # short codes, e.g. ["Bellever", "Princetown", "Hexworthy"]
+    station_full_names: list[str]
+    scaler: StandardScaler
+
+
+# ---------------------------------------------------------------------------
+# Forecast / truth loaders
+# ---------------------------------------------------------------------------
 
 def _load_model_forecasts(model: str) -> pd.DataFrame:
     """Load all lead-24h forecasts for one model across the full archive."""
@@ -74,8 +126,6 @@ def _load_model_forecasts(model: str) -> pd.DataFrame:
             frames.append(df)
 
     out = pd.concat(frames, ignore_index=True)
-    # Occasional duplicates can appear across adjacent date partitions;
-    # keep the last occurrence (assumed freshest write).
     out = out.drop_duplicates(subset=["ValidTimeUtc"], keep="last").sort_values("ValidTimeUtc")
     out = out.rename(
         columns={
@@ -86,14 +136,14 @@ def _load_model_forecasts(model: str) -> pd.DataFrame:
     return out.reset_index(drop=True)
 
 
-def _load_rainfall_truth() -> pd.DataFrame:
-    """Load all EA 15-min rainfall for Bellever and aggregate to hourly totals."""
+def _load_rainfall_truth(station: str) -> pd.DataFrame:
+    """Load all EA 15-min rainfall for a station and aggregate to hourly totals."""
     rain_dir = (
         WEATHERBLEND_DATA_ROOT
         / "truth"
         / "rainfall"
         / f"location={LOCATION}"
-        / f"station={STATION}"
+        / f"station={station}"
     )
     files = sorted(rain_dir.glob("date=*/rainfall.parquet"))
     if not files:
@@ -104,13 +154,7 @@ def _load_rainfall_truth() -> pd.DataFrame:
     ]
     raw = pd.concat(frames, ignore_index=True)
 
-    # Only trust EA-flagged "Good" quality readings. Unknown/missing Quality
-    # flags get dropped conservatively.
     raw = raw.loc[raw["Quality"] == "Good"].copy()
-
-    # ObservedTimeUtc is the *start* of each 15-min interval. Bucket to the
-    # containing hour and require all four 15-min slots to be present before
-    # we consider the hour complete.
     raw["hour_start"] = raw["ObservedTimeUtc"].dt.floor("h")
     hourly = raw.groupby("hour_start").agg(
         mm=("Value15MinMm", "sum"),
@@ -122,49 +166,37 @@ def _load_rainfall_truth() -> pd.DataFrame:
     return hourly[["ValidTimeUtc", "observed_wet", "mm"]]
 
 
-def build_phase1_frame(verbose: bool = True) -> pd.DataFrame:
-    """Build the joined features + target DataFrame (not yet train/test split)."""
-    if verbose:
-        print("Loading rainfall truth (Bellever Dartmoor)...")
-    truth = _load_rainfall_truth()
-    if verbose:
-        print(f"  truth rows: {len(truth):,}  wet fraction: {truth['observed_wet'].mean():.3f}")
+def _load_all_forecasts(verbose: bool = True) -> tuple[pd.DataFrame, list[str]]:
+    """Load all six models' lead-24h forecasts and inner-join them.
 
-    df = truth[["ValidTimeUtc", "observed_wet"]].copy()
-
+    Also adds cyclical hour-of-day features. Returns the joined forecast
+    frame plus the precip column name list.
+    """
+    fc_frames: list[pd.DataFrame] = []
     for model in MODELS:
         if verbose:
             print(f"Loading forecasts: {model}...")
         fc = _load_model_forecasts(model)
-        if verbose:
-            print(f"  rows: {len(fc):,}  null precip: {fc[f'precip_{model}'].isna().mean():.3f}")
-        df = df.merge(fc, on="ValidTimeUtc", how="inner")
+        fc_frames.append(fc)
+    forecasts = fc_frames[0]
+    for fc in fc_frames[1:]:
+        forecasts = forecasts.merge(fc, on="ValidTimeUtc", how="inner")
 
-    # Calendar features: hour-of-day encoded cyclically so that 23:00 and
-    # 00:00 sit next to each other in feature space.
-    hours = df["ValidTimeUtc"].dt.hour
-    df["hour_sin"] = np.sin(2 * np.pi * hours / 24)
-    df["hour_cos"] = np.cos(2 * np.pi * hours / 24)
+    hours = forecasts["ValidTimeUtc"].dt.hour
+    forecasts["hour_sin"] = np.sin(2 * np.pi * hours / 24)
+    forecasts["hour_cos"] = np.cos(2 * np.pi * hours / 24)
 
-    df = df.sort_values("ValidTimeUtc").reset_index(drop=True)
-    return df
-
-
-def prepare_phase1_dataset(
-    test_fraction: float = 0.2, verbose: bool = True
-) -> Phase1Dataset:
-    """Load, clean, feature-select and chronologically split the data."""
-    df = build_phase1_frame(verbose=verbose)
-
-    # Drop rows where any precip_* feature is null (hard requirement: all
-    # six models must have a 24h forecast for this valid time).
     precip_cols = [f"precip_{m}" for m in MODELS]
-    before = len(df)
-    df = df.dropna(subset=precip_cols)
-    if verbose:
-        print(f"After dropping rows with any null precip_*: {before:,} -> {len(df):,}")
+    return forecasts, precip_cols
 
-    # Candidate probability features: drop any column >50% null, keep the rest.
+
+def _select_features(df: pd.DataFrame, precip_cols: list[str], verbose: bool = True) -> tuple[pd.DataFrame, list[str]]:
+    """Drop rows with any null precip, decide which prob_* cols to keep, fill residual nulls."""
+    before = len(df)
+    df = df.dropna(subset=precip_cols).copy()
+    if verbose:
+        print(f"  drop rows with any null precip_*: {before:,} -> {len(df):,}")
+
     prob_cols = [f"prob_{m}" for m in MODELS]
     kept_prob_cols: list[str] = []
     for c in prob_cols:
@@ -174,27 +206,38 @@ def prepare_phase1_dataset(
         if verbose:
             status = "keep" if c in kept_prob_cols else "drop"
             print(f"  {c}: null_frac={null_frac:.3f}  [{status}]")
-    # For probability features we keep, fill residual NaNs with the column
-    # mean so we do not have to drop whole rows; weakly informative stand-in.
     for c in kept_prob_cols:
         df[c] = df[c].fillna(df[c].mean())
 
     feature_names = precip_cols + kept_prob_cols + ["hour_sin", "hour_cos"]
+    return df, feature_names
 
-    # Chronological 80/20 split.
+
+# ---------------------------------------------------------------------------
+# Public entry points
+# ---------------------------------------------------------------------------
+
+def prepare_phase1_dataset(test_fraction: float = 0.2, verbose: bool = True) -> Phase1Dataset:
+    """Single-station (Bellever) loader, kept identical to Phase 1."""
+    if verbose:
+        print("Loading rainfall truth (Bellever Dartmoor)...")
+    truth = _load_rainfall_truth("Bellever Dartmoor")
+    if verbose:
+        print(f"  truth rows: {len(truth):,}  wet fraction: {truth['observed_wet'].mean():.3f}")
+
+    forecasts, precip_cols = _load_all_forecasts(verbose=verbose)
+    df = truth[["ValidTimeUtc", "observed_wet"]].merge(forecasts, on="ValidTimeUtc", how="inner")
+    df, feature_names = _select_features(df, precip_cols, verbose=verbose)
+    df = df.sort_values("ValidTimeUtc").reset_index(drop=True)
+
     split_idx = int(len(df) * (1 - test_fraction))
-    train = df.iloc[:split_idx]
-    test = df.iloc[split_idx:]
+    train, test = df.iloc[:split_idx], df.iloc[split_idx:]
 
     if verbose:
         print(
             f"Final rows: {len(df):,}  features: {len(feature_names)}  "
             f"train: {len(train):,} ({train['ValidTimeUtc'].min()} -> {train['ValidTimeUtc'].max()})  "
             f"test: {len(test):,} ({test['ValidTimeUtc'].min()} -> {test['ValidTimeUtc'].max()})"
-        )
-        print(
-            f"  wet fraction  train={train['observed_wet'].mean():.3f}  "
-            f"test={test['observed_wet'].mean():.3f}"
         )
 
     return Phase1Dataset(
@@ -208,7 +251,84 @@ def prepare_phase1_dataset(
     )
 
 
+def prepare_phase2_dataset(test_fraction: float = 0.2, verbose: bool = True) -> Phase2Dataset:
+    """Three-station loader for Phase 2.
+
+    Builds one row per (valid_time, station). Splits each station's data
+    chronologically then concatenates, so station representation in train/test
+    is balanced. Standardises features on the *combined* training set.
+    """
+    forecasts, precip_cols = _load_all_forecasts(verbose=verbose)
+
+    train_frames: list[pd.DataFrame] = []
+    test_frames: list[pd.DataFrame] = []
+    station_codes = [code for _, code in STATIONS]
+    station_full_names = [full for full, _ in STATIONS]
+
+    for code_idx, (full_name, code) in enumerate(STATIONS):
+        if verbose:
+            print(f"\nLoading rainfall truth: {full_name}")
+        truth = _load_rainfall_truth(full_name)
+        if verbose:
+            print(f"  truth rows: {len(truth):,}  wet fraction: {truth['observed_wet'].mean():.3f}")
+
+        df = truth[["ValidTimeUtc", "observed_wet"]].merge(forecasts, on="ValidTimeUtc", how="inner")
+        df, feature_names = _select_features(df, precip_cols, verbose=verbose)
+        df = df.sort_values("ValidTimeUtc").reset_index(drop=True)
+        df["station_idx"] = code_idx
+        df["station"] = code
+
+        split_idx = int(len(df) * (1 - test_fraction))
+        train_frames.append(df.iloc[:split_idx])
+        test_frames.append(df.iloc[split_idx:])
+
+        if verbose:
+            tr, te = df.iloc[:split_idx], df.iloc[split_idx:]
+            print(
+                f"  {code}: train {len(tr):,} ({tr['ValidTimeUtc'].min()} -> {tr['ValidTimeUtc'].max()})"
+                f"  test {len(te):,} ({te['ValidTimeUtc'].min()} -> {te['ValidTimeUtc'].max()})"
+                f"  wet train={tr['observed_wet'].mean():.3f} test={te['observed_wet'].mean():.3f}"
+            )
+
+    train = pd.concat(train_frames, ignore_index=True)
+    test = pd.concat(test_frames, ignore_index=True)
+
+    # `feature_names` was set in the last loop iteration; identical across stations
+    # because the same forecast frame and selection logic is used.
+    X_train = train[feature_names]
+    X_test = test[feature_names]
+
+    # Pooled standardisation on the combined training set.
+    scaler = StandardScaler().fit(X_train.values)
+    X_train_s = scaler.transform(X_train.values).astype("float64")
+    X_test_s = scaler.transform(X_test.values).astype("float64")
+
+    if verbose:
+        print(f"\nCombined: train {len(train):,}  test {len(test):,}  features {len(feature_names)}")
+        for code_idx, code in enumerate(station_codes):
+            n_tr = int((train["station_idx"] == code_idx).sum())
+            n_te = int((test["station_idx"] == code_idx).sum())
+            print(f"  {code}: train={n_tr:,}  test={n_te:,}")
+
+    return Phase2Dataset(
+        X_train=X_train.reset_index(drop=True),
+        X_test=X_test.reset_index(drop=True),
+        X_train_s=X_train_s,
+        X_test_s=X_test_s,
+        y_train=train["observed_wet"].reset_index(drop=True),
+        y_test=test["observed_wet"].reset_index(drop=True),
+        station_idx_train=train["station_idx"].to_numpy(dtype="int64"),
+        station_idx_test=test["station_idx"].to_numpy(dtype="int64"),
+        valid_time_train=train["ValidTimeUtc"].reset_index(drop=True),
+        valid_time_test=test["ValidTimeUtc"].reset_index(drop=True),
+        feature_names=feature_names,
+        station_codes=station_codes,
+        station_full_names=station_full_names,
+        scaler=scaler,
+    )
+
+
 if __name__ == "__main__":
-    ds = prepare_phase1_dataset()
+    ds = prepare_phase2_dataset()
     print("\nFeature sample (train head):")
     print(ds.X_train.head().to_string())
