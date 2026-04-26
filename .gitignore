@@ -10,4 +10,5 @@ __pycache__/
 reports/*.pdf
 reports/*.png
 reports/**/*.nc
+reports/*.log
 data/cache/

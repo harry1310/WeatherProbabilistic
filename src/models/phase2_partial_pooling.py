@@ -52,10 +52,13 @@ in hierarchical Bayesian modelling, almost always worth doing by default.
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 
 import numpy as np
 import pymc as pm
+
+from src.heartbeat import Heartbeat
 
 os.environ.setdefault("PYTENSOR_FLAGS", "cxx=")
 
@@ -137,14 +140,33 @@ def fit_partial_pooling(
         logit_p = intercept_s[s_idx] + (X_data * beta_s[s_idx]).sum(axis=-1)
         pm.Bernoulli("y_obs", logit_p=logit_p, observed=y_data, dims="obs")
 
-        idata = pm.sample(
-            draws=draws,
-            tune=tune,
-            chains=chains,
-            nuts_sampler="nutpie",
-            random_seed=random_seed,
-            target_accept=target_accept,
-            progressbar=progressbar,
+        print(
+            f"    [{time.strftime('%H:%M:%S')}] partial_pool: entering pm.sample "
+            f"(chains={chains}, draws={draws}, tune={tune}, n_obs={len(y_train)}, n_features={n_features})",
+            flush=True,
+        )
+        t0 = time.time()
+        with Heartbeat(f"partial_pool n_obs={len(y_train)}", interval=30):
+            # nutpie progress: emit every 50 draws via stderr (its native sink). Run
+            # script redirects stderr to a separate file so progress output doesn't
+            # tangle with the main log. progress_template uses {chain}/{draws} so
+            # the file reads cleanly without TTY carriage-returns.
+            idata = pm.sample(
+                draws=draws,
+                tune=tune,
+                chains=chains,
+                nuts_sampler="nutpie",
+                nuts_sampler_kwargs={
+                    "progress_rate": 50,
+                    "progress_template": "[chain {chain}] draws {draws} | divs {divergences} | step {step_size:.4f}\n",
+                },
+                random_seed=random_seed,
+                target_accept=target_accept,
+                progressbar=progressbar,
+            )
+        print(
+            f"    [{time.strftime('%H:%M:%S')}] partial_pool: pm.sample returned in {time.time() - t0:.1f}s",
+            flush=True,
         )
 
     return PartialPoolingFit(
