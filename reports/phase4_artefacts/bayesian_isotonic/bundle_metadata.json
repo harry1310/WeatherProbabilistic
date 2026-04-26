@@ -1,0 +1,78 @@
+{
+  "fit_date_utc": "2026-04-26T19:28:18.152411+00:00",
+  "n_calibrators": 9,
+  "cells": [
+    {
+      "lead": 24,
+      "station": "Bellever",
+      "n_calib": 1451,
+      "calib_wet_rate": 0.13990351481736732,
+      "calib_p_mean": 0.17641010727249018,
+      "n_knots": 32
+    },
+    {
+      "lead": 24,
+      "station": "Hexworthy",
+      "n_calib": 1454,
+      "calib_wet_rate": 0.18982118294360384,
+      "calib_p_mean": 0.19393707831550652,
+      "n_knots": 30
+    },
+    {
+      "lead": 24,
+      "station": "Princetown",
+      "n_calib": 1494,
+      "calib_wet_rate": 0.2998661311914324,
+      "calib_p_mean": 0.2552160372026232,
+      "n_knots": 38
+    },
+    {
+      "lead": 48,
+      "station": "Bellever",
+      "n_calib": 1451,
+      "calib_wet_rate": 0.13990351481736732,
+      "calib_p_mean": 0.1910584476548934,
+      "n_knots": 24
+    },
+    {
+      "lead": 48,
+      "station": "Hexworthy",
+      "n_calib": 1454,
+      "calib_wet_rate": 0.18982118294360384,
+      "calib_p_mean": 0.20644171092975047,
+      "n_knots": 26
+    },
+    {
+      "lead": 48,
+      "station": "Princetown",
+      "n_calib": 1494,
+      "calib_wet_rate": 0.2998661311914324,
+      "calib_p_mean": 0.24388554804025228,
+      "n_knots": 37
+    },
+    {
+      "lead": 72,
+      "station": "Bellever",
+      "n_calib": 1451,
+      "calib_wet_rate": 0.13990351481736732,
+      "calib_p_mean": 0.19532352463104274,
+      "n_knots": 29
+    },
+    {
+      "lead": 72,
+      "station": "Hexworthy",
+      "n_calib": 1454,
+      "calib_wet_rate": 0.18982118294360384,
+      "calib_p_mean": 0.21088049969890257,
+      "n_knots": 28
+    },
+    {
+      "lead": 72,
+      "station": "Princetown",
+      "n_calib": 1494,
+      "calib_wet_rate": 0.2998661311914324,
+      "calib_p_mean": 0.2528773454780358,
+      "n_knots": 41
+    }
+  ]
+}
