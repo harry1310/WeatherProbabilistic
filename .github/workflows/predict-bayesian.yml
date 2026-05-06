@@ -1,0 +1,129 @@
+name: predict-bayesian
+
+# Live Bayesian P(wet) prediction with credible-interval widths.
+#
+# Reads the live forecast tree from R2 (written by WeatherBlend's collect.yml),
+# applies the Phase 4 Bayesian posterior bundle (live_bundle/ + posteriors/)
+# saved in this repo's reports/ tree, emits per-row CI widths into a
+# precipitation_bayesian_ci/ subtree of the same R2 bucket. WeatherBlend's
+# RenderSiteCommand reads from that subtree to surface confidence cells
+# alongside its own ProbWet predictions.
+#
+# Sequencing per 6h slot (HH ∈ {2, 8, 14, 20}; matches WeatherBlend's
+# scheduler-worker so the chain runs end-to-end on one cron tick):
+#
+#   HH:30      collect.yml (WeatherBlend)              Open-Meteo + ERA5 + METAR + EA + MO DataHub
+#   HH:45      s3-collect.yml (WeatherBlend)           Raw S3 cycles
+#   HH:55      predict-bayesian.yml (THIS workflow)    Live Bayesian CI widths -> R2
+#   HH+1:15    predict-and-render.yml (WeatherBlend)   Reads everything and renders site
+#
+# Cloudflare scheduler-worker dispatches this. GitHub-side `schedule:` not
+# used (per project policy in WeatherBlend memory:
+# project_scheduling_cloudflare_only). Manual dispatch retained for testing
+# and one-off backfills.
+
+on:
+  workflow_dispatch:
+    inputs:
+      anchor:
+        description: "Anchor date YYYY-MM-DD (UTC). Empty = today."
+        required: false
+        type: string
+
+concurrency:
+  # Per-anchor concurrency. We don't share a lock with WeatherBlend because
+  # the only filesystem we both touch is R2 and Bayesian writes are
+  # additive (under a separate prefix), so they can't conflict with
+  # WeatherBlend's predictions tree writes.
+  group: weatherprobabilistic-predict
+  cancel-in-progress: false
+
+jobs:
+  predict-bayesian:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python deps
+        # Pin matches the local .venv. nutpie + numba are the load-bearing
+        # ones — pymc's default sampler needs g++ which the GH runner does
+        # have, but the local box doesn't, so we standardise on nutpie
+        # everywhere for reproducibility.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install rclone
+        run: |
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+          rclone version
+
+      - name: Configure rclone for R2
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+        run: |
+          mkdir -p ~/.config/rclone
+          cat > ~/.config/rclone/rclone.conf <<EOF
+          [r2]
+          type = s3
+          provider = Cloudflare
+          access_key_id = ${R2_ACCESS_KEY_ID}
+          secret_access_key = ${R2_SECRET_ACCESS_KEY}
+          endpoint = ${R2_ENDPOINT}
+          acl = private
+          EOF
+
+      - name: Pull live forecast tree from R2 (5 models the Bayesian needs)
+        # Only the models the Bayesian posterior was trained on. Each
+        # model's tree is ~30-50 MB at this scale; fetching all 5 is well
+        # under a minute.
+        env:
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          mkdir -p ../WeatherBlend/data/forecasts/location=bonehill_rocks
+          for m in ecmwf_ifs025 gem_seamless gfs_seamless icon_seamless meteofrance_seamless; do
+            rclone copy "r2:${R2_BUCKET}/data/forecasts/location=bonehill_rocks/model=$m" \
+              "../WeatherBlend/data/forecasts/location=bonehill_rocks/model=$m" \
+              --fast-list --transfers 16 --checkers 32
+          done
+
+      - name: Run live Bayesian predict
+        run: |
+          ANCHOR="${{ github.event.inputs.anchor }}"
+          if [ -n "$ANCHOR" ]; then
+            python -u scripts/predict_live_with_ci.py --anchor "$ANCHOR"
+          else
+            python -u scripts/predict_live_with_ci.py
+          fi
+
+      - name: Push CI widths to R2
+        # `copy` not `sync`: additive only. Each anchor goes under its own
+        # `anchor=YYYY-MM-DD/` partition so we never overwrite earlier days.
+        env:
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          OUT=../WeatherBlend/data/predictions/precipitation_bayesian_ci
+          if [ -d "$OUT" ]; then
+            rclone copy "$OUT" "r2:${R2_BUCKET}/data/predictions/precipitation_bayesian_ci" \
+              --fast-list --transfers 16 --checkers 32 --progress
+          else
+            echo "::warning::No CI predictions produced — predict_live_with_ci.py wrote nothing."
+          fi
+
+      - name: Upload logs as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: predict-bayesian-${{ github.run_id }}
+          path: |
+            *.log
+            reports/
+          retention-days: 7
+          if-no-files-found: ignore
