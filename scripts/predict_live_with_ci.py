@@ -182,10 +182,12 @@ def build_feature_frame(anchor: pd.Timestamp, lead_hours: list[int]) -> pd.DataF
     window_dates = [anchor + pd.Timedelta(days=d) for d in range(-4, 2)]
 
     frames: list[pd.DataFrame] = []
+    missing_models: list[str] = []
     for model in MODELS_NO_UKMO:
         df = _load_one_model_live_runs(model, window_dates, lead_hours)
         if df.empty:
             print(f"  WARN: no live forecasts found for {model} in window — skipping.")
+            missing_models.append(model)
             return pd.DataFrame()
         # Drop the per-model RunTimeUtc before joining — different models
         # have different cycle hours so the join would 0-row-out otherwise.
@@ -196,6 +198,24 @@ def build_feature_frame(anchor: pd.Timestamp, lead_hours: list[int]) -> pd.DataF
             df = df.rename(columns={"RunTimeUtc": "provenance_run"}) if model == MODELS_NO_UKMO[0] \
                 else df.drop(columns=["RunTimeUtc"])
         frames.append(df)
+
+    # Defence-in-depth guard against the silent "everything pulled in 0 rows"
+    # mode — happened once on first CI fire (2026-05-06) when
+    # WEATHERBLEND_DATA_ROOT defaulted to a Windows path on a Linux runner.
+    # The glob pattern returned empty for every model, the workflow finished
+    # "successfully" with zero parquet rows written, and the silent failure
+    # only surfaced when the site renderer reported "Loaded 0 Bayesian CI
+    # rows". Loud abort here is much easier to diagnose than a downstream
+    # empty parquet.
+    if missing_models:
+        scanned = ", ".join(d.strftime("%Y-%m-%d") for d in window_dates)
+        raise RuntimeError(
+            f"No live forecasts found for {len(missing_models)}/{len(MODELS_NO_UKMO)} "
+            f"models ({', '.join(missing_models)}). "
+            f"Scanned date partitions {scanned} under "
+            f"{WEATHERBLEND_DATA_ROOT}/forecasts/location={LOCATION}/. "
+            f"Check WEATHERBLEND_DATA_ROOT env var and rclone-sync step."
+        )
     forecasts = frames[0]
     for fc in frames[1:]:
         forecasts = forecasts.merge(fc, on=["ValidTimeUtc", "LeadHours"], how="inner")
