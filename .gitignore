@@ -12,3 +12,9 @@ reports/*.png
 reports/**/*.nc
 reports/*.log
 data/cache/
+
+# Phase 2b live-predict bundle exception: the trained per-lead Bayesian
+# posteriors are needed by the predict-bayesian.yml workflow at inference
+# time. ~10 MB per lead (3 leads = ~30 MB total) — fine to track directly
+# until the bundle grows enough to warrant LFS or an R2-side artefact store.
+!reports/phase4_artefacts/bayesian_predictions/posteriors/*.nc

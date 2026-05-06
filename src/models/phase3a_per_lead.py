@@ -25,6 +25,7 @@ from src.models.phase2_partial_pooling import (
     PartialPoolingFit,
     fit_partial_pooling,
     predict_partial_pooling,
+    predict_partial_pooling_summary,
 )
 
 
@@ -109,4 +110,38 @@ def predict_per_lead(
             X_test_s[mask],
             station_idx_test[mask],
         )
+    return out
+
+
+def predict_per_lead_summary(
+    fit: PerLeadFit,
+    X_test_s: np.ndarray,
+    station_idx_test: np.ndarray,
+    lead_idx_test: np.ndarray,
+    quantiles: tuple[float, ...] = (0.05, 0.10, 0.50, 0.90, 0.95),
+) -> dict[str, np.ndarray]:
+    """Per-row posterior summary (mean, std, quantiles) — Option 2 confidence signal.
+
+    Returns a dict of per-row arrays. Each (station, lead) cell uses its own
+    fit; rows are filled in slot-by-slot so the output is a flat per-row view
+    over the test set in the same order as the input.
+
+    See `predict_partial_pooling_summary` for the per-cell semantics.
+    """
+    n = len(X_test_s)
+    keys = ("mean", "std", *(f"q{q:g}" for q in quantiles))
+    out = {k: np.empty(n, dtype="float64") for k in keys}
+
+    for l_idx, lead in enumerate(fit.lead_hours):
+        mask = lead_idx_test == l_idx
+        if not mask.any():
+            continue
+        cell = predict_partial_pooling_summary(
+            fit.fits_by_lead[lead],
+            X_test_s[mask],
+            station_idx_test[mask],
+            quantiles=quantiles,
+        )
+        for k in keys:
+            out[k][mask] = cell[k]
     return out

@@ -1,0 +1,54 @@
+{
+  "feature_names": [
+    "precip_ecmwf_ifs025",
+    "precip_gem_seamless",
+    "precip_gfs_seamless",
+    "precip_icon_seamless",
+    "precip_meteofrance_seamless",
+    "hour_sin",
+    "hour_cos"
+  ],
+  "station_codes": [
+    "Bellever",
+    "Princetown",
+    "Hexworthy"
+  ],
+  "station_full_names": [
+    "Bellever Dartmoor",
+    "Princetown",
+    "Dartmoor nr Hexworthy"
+  ],
+  "lead_hours": [
+    24,
+    48,
+    72
+  ],
+  "scaler_mean": [
+    0.14804764616552774,
+    0.14181283219438118,
+    0.11048595292331055,
+    0.13258921791951406,
+    0.15567862566438873,
+    0.0002840516372832315,
+    0.00018654179342210615
+  ],
+  "scaler_scale": [
+    0.44935791533538805,
+    0.4191706584415908,
+    0.477124541006934,
+    0.5685531402809963,
+    0.6643646841491926,
+    0.7070879385859801,
+    0.707125541628257
+  ],
+  "scaler_var": [
+    0.20192253607456578,
+    0.17570404089835676,
+    0.22764782763107747,
+    0.3232526733233823,
+    0.4413804335446564,
+    0.49997335289377076,
+    0.5000265316230559
+  ],
+  "scaler_n_samples_seen": 105360
+}

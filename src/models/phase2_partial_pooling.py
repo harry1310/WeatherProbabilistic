@@ -196,3 +196,60 @@ def predict_partial_pooling(
         logit = ints[..., None] + np.einsum("nf,cdf->cdn", X_test_s[mask], bets)
         out[mask] = (1.0 / (1.0 + np.exp(-logit))).mean(axis=(0, 1))
     return out
+
+
+def predict_partial_pooling_summary(
+    fit: PartialPoolingFit,
+    X_test_s: np.ndarray,
+    station_idx_test: np.ndarray,
+    quantiles: tuple[float, ...] = (0.05, 0.10, 0.50, 0.90, 0.95),
+) -> dict[str, np.ndarray]:
+    """Per-row posterior summary of P(wet) — mean, std, and arbitrary quantiles.
+
+    Mirrors `predict_partial_pooling` but keeps the full posterior over the
+    chain × draw axis instead of collapsing to the mean. Returns a dict with:
+      - "mean": shape (n,)   — same as predict_partial_pooling
+      - "std":  shape (n,)   — posterior standard deviation
+      - "q{p}": shape (n,)   — posterior quantile at level p (for each p in `quantiles`)
+
+    The credible interval width that matters for Option 2's confidence signal
+    is `q0.95 - q0.05` (or `q0.90 - q0.10` for an 80% CI). Wider = the model
+    is less certain about this row's P(wet). Phase 4 found that narrow-CI
+    rows have ~4-5x lower Brier than wide-CI rows on the same test slice,
+    so this width transfers as a usable forecast-skill flag downstream.
+
+    Memory shape: holds (chain, draw, n_per_station) probabilities in
+    a single intermediate array. With ~8000 draws (4 chains × 2000) and
+    a few hundred test rows per station, this is well under 100MB.
+    """
+    intercept_s = fit.idata.posterior["intercept_s"].values  # (chain, draw, station)
+    beta_s = fit.idata.posterior["beta_s"].values            # (chain, draw, station, feature)
+
+    n = len(X_test_s)
+    mean = np.empty(n, dtype="float64")
+    std = np.empty(n, dtype="float64")
+    quants = {q: np.empty(n, dtype="float64") for q in quantiles}
+
+    for s_idx in range(intercept_s.shape[-1]):
+        mask = station_idx_test == s_idx
+        if not mask.any():
+            continue
+        ints = intercept_s[..., s_idx]                        # (chain, draw)
+        bets = beta_s[..., s_idx, :]                          # (chain, draw, feature)
+        logit = ints[..., None] + np.einsum("nf,cdf->cdn", X_test_s[mask], bets)
+        p = 1.0 / (1.0 + np.exp(-logit))                      # (chain, draw, n_mask)
+        # Flatten chain + draw into a single posterior axis for quantile
+        # computation. Order doesn't matter because the chains are exchangeable
+        # under Bayesian inference (no within-chain dependency we care about
+        # for marginal quantiles of the posterior predictive).
+        flat = p.reshape(-1, p.shape[-1])                     # (chain*draw, n_mask)
+        mean[mask] = flat.mean(axis=0)
+        std[mask] = flat.std(axis=0)
+        qs = np.quantile(flat, list(quantiles), axis=0)       # (n_quantiles, n_mask)
+        for qi, q in enumerate(quantiles):
+            quants[q][mask] = qs[qi]
+
+    out = {"mean": mean, "std": std}
+    for q, arr in quants.items():
+        out[f"q{q:g}"] = arr
+    return out
