@@ -95,6 +95,11 @@ jobs:
           done
 
       - name: Run live Bayesian predict
+        # WEATHERBLEND_DATA_ROOT overrides the dev-machine Windows default
+        # in src/data.py so the script reads forecasts (and writes
+        # predictions) under the rclone'd-into runner-relative tree.
+        env:
+          WEATHERBLEND_DATA_ROOT: ${{ github.workspace }}/../WeatherBlend/data
         run: |
           ANCHOR="${{ github.event.inputs.anchor }}"
           if [ -n "$ANCHOR" ]; then

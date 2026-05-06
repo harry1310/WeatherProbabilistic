@@ -25,6 +25,7 @@ boundary.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,7 +34,14 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
 
-WEATHERBLEND_DATA_ROOT = Path(r"C:/Projects/Weather/WeatherBlend/data")
+# Local default points at the WeatherBlend sibling checkout on the dev
+# machine. CI / cron / non-Windows callers override via the
+# WEATHERBLEND_DATA_ROOT environment variable — the predict-bayesian.yml
+# workflow sets this to the runner-relative path it rclone-copies into.
+WEATHERBLEND_DATA_ROOT = Path(
+    os.environ.get("WEATHERBLEND_DATA_ROOT")
+    or r"C:/Projects/Weather/WeatherBlend/data"
+)
 
 # These six models have ~2 years of backfill in the WeatherBlend tree.
 # Other models (ecmwf_hres_wb2, gfs_ncep, met_office_spot) have only a
