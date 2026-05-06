@@ -59,7 +59,7 @@ def pick_demo_days(n_days: int = 6) -> list[DateType]:
         # useful demo. Skip if any station partial.
         try:
             wets = []
-            for s in ("Bellever", "Princetown", "Hexworthy"):
+            for s in ("Bellever", "Hexworthy", "Bovey"):
                 f = get_day_features(s, d, DEFAULT_LEAD)
                 wets.append(f.observed_wet.mean())
         except ValueError:
@@ -221,7 +221,7 @@ def calibration_check_simulated_outputs(
     A perfectly-calibrated simulation has mean ≈ observed.
     Surfaces the within-day independence assumption's footprint."""
     rows = []
-    for station in ("Bellever", "Princetown", "Hexworthy"):
+    for station in ("Bellever", "Hexworthy", "Bovey"):
         days = list_test_days(station, lead, full_24h_only=True)
         # Cap demo to a manageable subset (every Nth day) to keep runtime sane
         days = days[::3]
@@ -268,7 +268,7 @@ def comparison_vs_lightgbm(
 ) -> pd.DataFrame:
     rows = []
     for d in demo_days:
-        for station in ("Bellever", "Princetown", "Hexworthy"):
+        for station in ("Bellever", "Hexworthy", "Bovey"):
             try:
                 bay = simulate_day(station, d, lead, n_samples=n_samples, seed=42)
                 lgb_strip = lightgbm_independent_bernoulli(
@@ -423,8 +423,8 @@ def write_report(
     L.append("- **WeatherBlend 3b/3d-shape comparison** — would shell out to WB's "
              "`predict --target dry-window --for-date` for each demo day. Cleanest as a "
              "separate cross-repo script.")
-    L.append("- **Princetown covariate shift** — Princetown is the most consistently-wet "
-             "station; its Phase 4 calibration was the only cell where isotonic regressed.")
+    # Princetown removed from active station set 2026-05-06; its Phase 4
+    # calibration narrative lives in the historical reports/ tree.
     L.append("- **Phase 4.5 calibrators are point-estimate rescalings** — applied per draw "
              "they preserve relative ordering but don't reduce parameter-uncertainty width "
              "of the credible intervals. Honest representation of underlying uncertainty.")
@@ -452,7 +452,7 @@ def main() -> None:
     print("\nGenerating heatmaps for each demo day × station...")
     heatmap_paths: list[Path] = []
     for d in demo_days:
-        for station in ("Bellever", "Princetown", "Hexworthy"):
+        for station in ("Bellever", "Hexworthy", "Bovey"):
             try:
                 out = simulate_day(station, d, DEFAULT_LEAD, n_samples=DEFAULT_N_SAMPLES, seed=42)
             except Exception as e:

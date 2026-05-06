@@ -66,10 +66,20 @@ LOCATION = "bonehill_rocks"
 
 # Station identifiers as they appear in the WeatherBlend `station=` parquet
 # partitions, paired with short codes used in plots and tables.
+#
+# Princetown removed 2026-05-06 — dropped from the active rainfall config
+# in WeatherBlend on 2026-05-04 and subsequently retired from the
+# probabilistic pipeline. Phase 1-3 reports under reports/ retain
+# Princetown narratively (historical research record) but no live code
+# path references it any more.
+#
+# Bovey Tracey added 2026-05-06 to extend the Phase 4 hierarchy so the
+# WeatherBlend Bayesian confidence panel covers Bovey — was silently
+# empty there until this retrain.
 STATIONS: tuple[tuple[str, str], ...] = (
     ("Bellever Dartmoor", "Bellever"),
-    ("Princetown", "Princetown"),
     ("Dartmoor nr Hexworthy", "Hexworthy"),
+    ("Bovey Tracey", "Bovey"),
 )
 
 LEAD_HOURS = 24
@@ -154,7 +164,7 @@ class Phase2Dataset:
     valid_time_train: pd.Series
     valid_time_test: pd.Series
     feature_names: list[str]
-    station_codes: list[str]  # short codes, e.g. ["Bellever", "Princetown", "Hexworthy"]
+    station_codes: list[str]  # short codes, e.g. ["Bellever", "Hexworthy", "Bovey"]
     station_full_names: list[str]
     scaler: StandardScaler
 

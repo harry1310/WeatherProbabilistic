@@ -104,7 +104,7 @@ def fit_partial_pooling(
         mu_beta = pm.Normal("mu_beta", mu=0.0, sigma=1.0, dims="feature")
 
         # Between-station SD (sigma_*) must be positive, hence HalfNormal.
-        # The three stations (Bellever, Princetown, Hexworthy) sit within
+        # The active stations (Bellever, Hexworthy, Bovey) sit within
         # ~10 km on Dartmoor at similar elevation/microclimate, so we
         # genuinely expect their coefficients on standardised features to
         # be close. HalfNormal(sigma=0.5) puts the 95% interval on the

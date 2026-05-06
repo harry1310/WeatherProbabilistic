@@ -69,14 +69,12 @@ OUT_DIR = BAKEOFF_DIR / "method=B"
 # to read the replay parquets. Hardcoded here to keep the script standalone;
 # update if the precipitation manifest's Current pointer moves.
 PRECIP_3A_CHAMPIONS = {
-    "ea_bellever_dartmoor": "v2026-04-28_232709",
-    "ea_princetown":        "v2026-04-28_232739",
+    "ea_bellever_dartmoor":     "v2026-04-28_232709",
     "ea_dartmoor_nr_hexworthy": "v2026-04-28_232809",
 }
 
 STATION_FRIENDLY_NAME = {
-    "ea_bellever_dartmoor": "Bellever Dartmoor",
-    "ea_princetown":        "Princetown",
+    "ea_bellever_dartmoor":     "Bellever Dartmoor",
     "ea_dartmoor_nr_hexworthy": "Dartmoor nr Hexworthy",
 }
 

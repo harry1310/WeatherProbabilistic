@@ -25,7 +25,7 @@ below). The σ hyperparameters are estimated from the data and tell us:
                     effects predict?
 
 If `σ_inter` is small for a feature, its (station, lead) effects are
-essentially additive: "Princetown's 72h coefficient = Princetown effect
+essentially additive: "Bellever's 72h coefficient = Bellever effect
 + 72h effect", with no special interaction. If `σ_inter` is large, the
 combination matters non-additively.
 

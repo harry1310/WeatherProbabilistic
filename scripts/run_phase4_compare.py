@@ -55,7 +55,6 @@ LEADS = (24, 48, 72)
 WEATHERBLEND_DATA_ROOT = Path(r"C:/Projects/Weather/WeatherBlend/data/models/precipitation")
 WEATHERBLEND_VERSIONS = {
     "Bellever":   ("ea_bellever_dartmoor",     "v2026-04-26_100331"),
-    "Princetown": ("ea_princetown",            "v2026-04-26_100416"),
     "Hexworthy":  ("ea_dartmoor_nr_hexworthy", "v2026-04-26_100449"),
 }
 
@@ -373,7 +372,7 @@ def _build_report_md(combined, cell, headline, calib, uq, by_month, n_test, wb_n
     lines.append("## Limitations\n")
     lines.append("- Single test split. Re-running with different chronological cuts would give a less point-estimate-like read on relative performance.")
     lines.append("- Bayesian Phase 3 Model A uses only the 7 features Phase 1-3 settled on. WeatherBlend's full production 3a-lean has 27 features (ensemble spread + meteo covariates + day-of-year). A native-feature LightGBM comparison is documented in the audit as Phase 4 stretch — not included here.")
-    lines.append("- Princetown's autumn 2026 covariate shift (noted in Phase 2 report) is carried forward — Princetown's test slice is post-shift while training is pre-shift.\n")
+    # Princetown narrative removed 2026-05-06 along with the station retirement.
 
     lines.append("## What this enables\n")
     lines.append("Phase 5: Monte Carlo dry-window simulation using the saved Bayesian posteriors at `reports/phase4_artefacts/bayesian_predictions/posteriors/lead_{N}h.nc`. Per-row credible intervals computed in this report demonstrate the posteriors are informative; using them for downstream simulation has a defensible foundation.\n")

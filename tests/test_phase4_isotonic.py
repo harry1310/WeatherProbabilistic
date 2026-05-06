@@ -29,7 +29,7 @@ def _make_synthetic(n_per_cell: int = 200, seed: int = 0) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
     rows = []
     base_time = pd.Timestamp("2025-06-01 00:00:00")
-    for station in ["Bellever", "Princetown"]:
+    for station in ["Bellever", "Hexworthy"]:
         for lead in [24, 48, 72]:
             # True wet rate ~28%
             y = (rng.uniform(0, 1, n_per_cell) < 0.28).astype("int8")
@@ -83,7 +83,7 @@ def test_fit_returns_one_calibrator_per_cell():
     df = _make_synthetic()
     calib, _ = split_calibration_eval(df)
     bundle = fit_per_cell(calib)
-    expected = {(lead, station) for station in ["Bellever", "Princetown"] for lead in [24, 48, 72]}
+    expected = {(lead, station) for station in ["Bellever", "Hexworthy"] for lead in [24, 48, 72]}
     assert set(bundle.calibrators.keys()) == expected
 
 
