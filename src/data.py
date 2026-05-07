@@ -583,6 +583,7 @@ def prepare_phase3_dataset(
     test_fraction: float = 0.2,
     verbose: bool = True,
     models: tuple[str, ...] = MODELS,
+    lead_as_feature: bool = False,
 ) -> Phase3Dataset:
     """Three-station × multi-lead loader for Phase 3.
 
@@ -591,6 +592,13 @@ def prepare_phase3_dataset(
     leads for a given (station, valid_time) go to the same side of the
     split, so a single valid_time isn't half in train and half in test
     via different leads.
+
+    Phase 5 ``lead_as_feature=True`` mode appends a continuous "lead"
+    column (raw hours — z-scored alongside the others by the pooled
+    StandardScaler) to the feature matrix, so a single posterior can be
+    fit across all rows pooled. lead_idx_* arrays still get returned
+    because verify/predict slicing per lead is convenient downstream;
+    they're just not needed inside the model.
 
     Phase 4 passes ``models=MODELS_NO_UKMO`` to fit a 5-model variant with
     UKMO removed entirely from the join (so we no longer row-drop on UKMO
@@ -615,6 +623,15 @@ def prepare_phase3_dataset(
 
         df = truth[["ValidTimeUtc", "observed_wet"]].merge(forecasts, on="ValidTimeUtc", how="inner")
         df, fn = _select_features(df, precip_cols, verbose=verbose, models=models)
+        if lead_as_feature:
+            # Append a "lead" column to the feature set. Raw hours
+            # (24/48/72) — the pooled StandardScaler below will turn it
+            # into a z-score on the same footing as the other 7 features.
+            # Keeping it at the end of the column order means existing
+            # 7-feature posteriors aren't accidentally interpretable as
+            # 8-feature ones; the feature list is the discriminator.
+            df = df.assign(lead=df["LeadHours"].astype("float64"))
+            fn = list(fn) + ["lead"]
         feature_names = fn  # identical across stations
         df = df.sort_values(["ValidTimeUtc", "LeadHours"]).reset_index(drop=True)
         df["station_idx"] = s_idx
