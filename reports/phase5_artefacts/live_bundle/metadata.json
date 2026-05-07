@@ -1,0 +1,60 @@
+{
+  "phase": "5",
+  "feature_names": [
+    "precip_ecmwf_ifs025",
+    "precip_gem_seamless",
+    "precip_gfs_seamless",
+    "precip_icon_seamless",
+    "precip_meteofrance_seamless",
+    "hour_sin",
+    "hour_cos",
+    "lead"
+  ],
+  "station_codes": [
+    "Bellever",
+    "Hexworthy",
+    "Bovey"
+  ],
+  "station_full_names": [
+    "Bellever Dartmoor",
+    "Dartmoor nr Hexworthy",
+    "Bovey Tracey"
+  ],
+  "lead_hours": [
+    24,
+    48,
+    72
+  ],
+  "lead_feature_index": 7,
+  "scaler_mean": [
+    0.15095133713283648,
+    0.1453387890301525,
+    0.11454527741244092,
+    0.13504018705246235,
+    0.1602211505674899,
+    6.053098967888278e-06,
+    -5.683197151062758e-05,
+    47.96633055677334
+  ],
+  "scaler_scale": [
+    0.45026585531663016,
+    0.42283569766074053,
+    0.4831443431709512,
+    0.5724894550413585,
+    0.6706112222205456,
+    0.7070038117487298,
+    0.7072097333226216,
+    19.595889017051327
+  ],
+  "scaler_var": [
+    0.2027393404640165,
+    0.17879002721624515,
+    0.2334284563380898,
+    0.3277441761335516,
+    0.44971941136813404,
+    0.49985438982723346,
+    0.5001456069062535,
+    383.99886636859287
+  ],
+  "scaler_n_samples_seen": 102645
+}
