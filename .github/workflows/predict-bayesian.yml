@@ -94,18 +94,25 @@ jobs:
               --fast-list --transfers 16 --checkers 32
           done
 
-      - name: Run live Bayesian predict
-        # WEATHERBLEND_DATA_ROOT overrides the dev-machine Windows default
-        # in src/data.py so the script reads forecasts (and writes
-        # predictions) under the rclone'd-into runner-relative tree.
+      - name: Run live Bayesian predict (Phase 5 — lead-as-feature)
+        # Switched 2026-05-07 from Phase 4's per-lead independent posteriors
+        # to Phase 5's single lead-as-feature posterior. Predict-side
+        # changes are: (a) no LeadHours filter at the per-model load —
+        # every hourly cycle row contributes; (b) lead is appended as a
+        # standardised feature column rather than driving a posterior
+        # selection; (c) one posterior call per station instead of
+        # nine cells. Output schema identical to Phase 4 so the
+        # WeatherBlend renderer reads it cleanly without changes.
+        # Phase 4 script + posterior bundle retained on disk for
+        # rollback by reverting this step's script path.
         env:
           WEATHERBLEND_DATA_ROOT: ${{ github.workspace }}/../WeatherBlend/data
         run: |
           ANCHOR="${{ github.event.inputs.anchor }}"
           if [ -n "$ANCHOR" ]; then
-            python -u scripts/predict_live_with_ci.py --anchor "$ANCHOR"
+            python -u scripts/predict_live_with_ci_phase5.py --anchor "$ANCHOR"
           else
-            python -u scripts/predict_live_with_ci.py
+            python -u scripts/predict_live_with_ci_phase5.py
           fi
 
       - name: Push CI widths to R2
@@ -119,7 +126,7 @@ jobs:
             rclone copy "$OUT" "r2:${R2_BUCKET}/data/predictions/precipitation_bayesian_ci" \
               --fast-list --transfers 16 --checkers 32 --progress
           else
-            echo "::warning::No CI predictions produced — predict_live_with_ci.py wrote nothing."
+            echo "::warning::No CI predictions produced — predict_live_with_ci_phase5.py wrote nothing."
           fi
 
       - name: Upload logs as artifact
