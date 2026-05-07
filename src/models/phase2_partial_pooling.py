@@ -140,29 +140,35 @@ def fit_partial_pooling(
         logit_p = intercept_s[s_idx] + (X_data * beta_s[s_idx]).sum(axis=-1)
         pm.Bernoulli("y_obs", logit_p=logit_p, observed=y_data, dims="obs")
 
+        total_per_chain = tune + draws
+        total_overall = chains * total_per_chain
         print(
             f"    [{time.strftime('%H:%M:%S')}] partial_pool: entering pm.sample "
-            f"(chains={chains}, draws={draws}, tune={tune}, n_obs={len(y_train)}, n_features={n_features})",
+            f"(chains={chains}, draws={draws}, tune={tune}, n_obs={len(y_train)}, "
+            f"n_features={n_features}, total_iters={total_overall:,})",
             flush=True,
         )
         t0 = time.time()
-        with Heartbeat(f"partial_pool n_obs={len(y_train)}", interval=30):
-            # nutpie progress: emit every 50 draws via stderr (its native sink). Run
-            # script redirects stderr to a separate file so progress output doesn't
-            # tangle with the main log. progress_template uses {chain}/{draws} so
-            # the file reads cleanly without TTY carriage-returns.
+        # Sampler: blackjax via JAX. Faster than native PyMC NUTS without
+        # g++ (which falls back to Python and crawls), and faster than
+        # nutpie on this Windows box where nutpie also lacks its native
+        # backend. Visibility comes from blackjax's own fastprogress bar
+        # — verified to emit text in non-TTY context once fastprogress +
+        # IPython are installed in the venv. PyMC's pm.sample callback
+        # is a native-NUTS-only feature; blackjax JIT-compiles the whole
+        # sampling loop so a Python callback can't fire. The progress
+        # bar is the supported alternative, and it does work.
+        # See memory/feedback_bayesian_training_must_log_progress.md.
+        with Heartbeat(f"partial_pool n_obs={len(y_train)}", interval=60):
             idata = pm.sample(
                 draws=draws,
                 tune=tune,
                 chains=chains,
-                nuts_sampler="nutpie",
-                nuts_sampler_kwargs={
-                    "progress_rate": 50,
-                    "progress_template": "[chain {chain}] draws {draws} | divs {divergences} | step {step_size:.4f}\n",
-                },
+                nuts_sampler="blackjax",
                 random_seed=random_seed,
                 target_accept=target_accept,
-                progressbar=progressbar,
+                progressbar=True,
+                cores=1,
             )
         print(
             f"    [{time.strftime('%H:%M:%S')}] partial_pool: pm.sample returned in {time.time() - t0:.1f}s",
