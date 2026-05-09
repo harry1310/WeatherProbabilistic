@@ -116,7 +116,15 @@ def build_pooled_training_features(station_friendly: str) -> pd.DataFrame:
 def build_pooled_live_features(station_friendly: str, anchor: datetime) -> pd.DataFrame:
     """Pull live feature rows for upcoming valid times at all leads in
     LEADS, pool with `lead` column. Returns a DataFrame with the 22
-    base + 3 synoptic + 1 `lead` columns. NO truth join."""
+    base + 3 synoptic + 1 `lead` columns. NO truth join.
+
+    RunTimeSource = 'reported' here (NOT 'offset_day') — training pulls
+    from the historical offset_day archive but live forecasts land in
+    the date-partitioned 'reported' tree. predict_live_with_ci.py
+    documents the same split. Small distribution shift between the two
+    is accepted for the MVP — calibration drifts slightly but the BART
+    posterior structure is robust to it.
+    """
     fc_glob = str((WEATHERBLEND_DATA_ROOT / "forecasts" / "**" / "*.parquet")).replace("\\", "/")
     model_in = "(" + ",".join(f"'{full}'" for full, _ in MODELS_LEAN) + ")"
     precip_pivot = ",\n        ".join(
@@ -135,7 +143,7 @@ def build_pooled_live_features(station_friendly: str, anchor: datetime) -> pd.Da
                                   ORDER BY RunTimeUtc DESC) AS rn
         FROM read_parquet('{fc_glob}', hive_partitioning = false, union_by_name = true)
         WHERE LocationName = '{LOCATION}'
-          AND RunTimeSource = 'offset_day'
+          AND RunTimeSource = 'reported'
           AND LeadHours IN {leads_in}
           AND Model IN {model_in}
           AND ValidTimeUtc > timestamp '{anchor.isoformat()}'
@@ -246,7 +254,11 @@ def train_and_predict_one_station(station_friendly: str, anchor: datetime) -> di
     scaler = StandardScaler().fit(X_train)
     X_train_s = scaler.transform(X_train).astype(np.float64)
     X_test_s  = scaler.transform(X_test).astype(np.float64)
-    X_live_s  = scaler.transform(X_live).astype(np.float64)
+    # sklearn 1.4+ rejects 0-row inputs in transform(); guard the empty-live
+    # case so the script can still emit training_metadata when the live
+    # forecast tree hasn't refreshed yet.
+    X_live_s = (scaler.transform(X_live).astype(np.float64)
+                if has_live else np.zeros((0, X_train_s.shape[1]), dtype=np.float64))
 
     # Stack [test, live] as x.test so one fit covers both.
     n_test = X_test_s.shape[0]
