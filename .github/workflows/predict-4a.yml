@@ -89,12 +89,20 @@ jobs:
         # — same R API surface, no compile dependency. Officially
         # supported fallback path; performance penalty is negligible
         # for our usage (we call R functions, not tight per-row loops).
+        #
+        # rpy2<3.6: rpy2 3.6+ was built against R 4.5 and references
+        # `R_getVar`, a symbol that doesn't exist in R 4.4 (which is
+        # what Ubuntu 24.04's r-base ships). Importing rpy2 3.6+ here
+        # blows up with `ffi.error: symbol 'R_getVar' not found in
+        # library '/usr/lib/R/lib/libR.so'`. Pinning to the 3.5 line
+        # keeps us compatible with the runner's R until we adopt the
+        # CRAN apt repo (cran40) and bump to R 4.5+.
         env:
           RPY2_CFFI_MODE: ABI
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install rpy2
+          pip install 'rpy2<3.6'
 
       - name: Install rclone
         run: |
