@@ -1,0 +1,157 @@
+name: predict-4a
+
+# Daily Phase 4a (dbarts BART) train-and-predict for the precipitation
+# P(wet) blender. Runs once a day at 12:00 UTC piggybacking on the
+# existing Cloudflare daily tick that fires WeatherBlend's era5-refresh —
+# same cron, additional dispatch (no new schedule entry).
+#
+# Why daily not 6-hourly: dbarts's BART tree state lives in C++ pointers
+# that don't survive saveRDS / serialize round-trips, so every predict
+# requires a fresh fit (Y.mean() falls back otherwise). Train+predict
+# in single R session via `dbarts.bart(x.test=live_features, ...)`.
+# Cost: ~24 min wall (3 stations × ~8 min each, lead-as-feature pooled).
+# Per-cycle BART would be ~100 min/day of CI; daily caps it at ~24 min.
+#
+# Freshness: 4a predicts the full 7-day forecast horizon at the 12:00 UTC
+# anchor. WeatherBlend's predict-and-render at HH:15 reads the day's 4a
+# parquet — staleness peaks at ~20h relative to the 4a fit, acceptable
+# for a 1000-draw × 500-tree posterior-mean tree blender (the blender
+# itself is a slow-moving function of the underlying NWPs).
+#
+# Failure path: WorkflowRun completed events with conclusion=failure
+# trigger the cross-repo /github-webhook handler in the Cloudflare
+# scheduler-worker, which auto-files a `[ci-fail] predict-4a` issue
+# under the `ci-failure` label. No special workflow-side wiring needed —
+# the GH App webhook subscription handles it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      anchor:
+        description: "Anchor date YYYY-MM-DD (UTC). Empty = today."
+        required: false
+        type: string
+      stations:
+        description: "Comma-separated station slugs (default: all 3 active)."
+        required: false
+        type: string
+
+concurrency:
+  # Don't share lock with predict-bayesian — they touch different R2
+  # prefixes (precipitation_bayesian_ci/ vs precipitation/{station}/...
+  # phase4a) and can run in parallel without conflict. Per-anchor lock
+  # so two manually-triggered same-anchor runs don't race.
+  group: weatherprobabilistic-4a
+  cancel-in-progress: false
+
+jobs:
+  predict-4a:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python deps
+        # Same requirements.txt as predict-bayesian; rpy2 added 2026-05-09
+        # for the R bridge.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install rpy2
+
+      - name: Install R + dbarts
+        # Apt's r-base + r-base-dev let dbarts compile from CRAN source
+        # in ~2 min on a standard runner. R-level lib path under user
+        # home so we don't need sudo on every install.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends r-base r-base-dev
+          R --version
+          mkdir -p ~/R/x86_64-pc-linux-gnu-library/4.4
+          echo 'R_LIBS_USER=~/R/x86_64-pc-linux-gnu-library/4.4' >> ~/.Renviron
+          R -e 'install.packages("dbarts", repos="https://cloud.r-project.org", lib=Sys.getenv("R_LIBS_USER"))'
+          R -e 'library(dbarts); cat("dbarts version:", as.character(packageVersion("dbarts")), "\n")'
+
+      - name: Install rclone
+        run: |
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+          rclone version
+
+      - name: Configure rclone for R2
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+        run: |
+          mkdir -p ~/.config/rclone
+          cat > ~/.config/rclone/rclone.conf <<EOF
+          [r2]
+          type = s3
+          provider = Cloudflare
+          access_key_id = ${R2_ACCESS_KEY_ID}
+          secret_access_key = ${R2_SECRET_ACCESS_KEY}
+          endpoint = ${R2_ENDPOINT}
+          acl = private
+          EOF
+
+      - name: Pull live forecast tree from R2 (7 models the BART feature set needs)
+        # 4a uses the lean 7-model precip set + per-NWP wind + pressure for
+        # synoptic flow features. Truth (EA rainfall) is also needed for
+        # training labels.
+        env:
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          mkdir -p ../WeatherBlend/data/forecasts/location=bonehill_rocks
+          for m in gfs_seamless ecmwf_ifs025 icon_seamless meteofrance_seamless gem_seamless ecmwf_aifs025_single jma_seamless; do
+            rclone copy "r2:${R2_BUCKET}/data/forecasts/location=bonehill_rocks/model=$m" \
+              "../WeatherBlend/data/forecasts/location=bonehill_rocks/model=$m" \
+              --fast-list --transfers 16 --checkers 32
+          done
+          mkdir -p ../WeatherBlend/data/truth/rainfall
+          rclone copy "r2:${R2_BUCKET}/data/truth/rainfall" \
+            ../WeatherBlend/data/truth/rainfall \
+            --fast-list --transfers 16 --checkers 32
+
+      - name: Run Phase 4a BART train-and-predict
+        # Single-session, lead-as-feature, 7-day horizon. ~24 min wall.
+        env:
+          WEATHERBLEND_DATA_ROOT: ${{ github.workspace }}/../WeatherBlend/data
+          R_HOME: /usr/lib/R
+          R_LIBS_USER: /home/runner/R/x86_64-pc-linux-gnu-library/4.4
+        run: |
+          ANCHOR="${{ github.event.inputs.anchor }}"
+          STATIONS="${{ github.event.inputs.stations }}"
+          ARGS=""
+          if [ -n "$ANCHOR" ]; then ARGS="$ARGS --anchor $ANCHOR"; fi
+          if [ -n "$STATIONS" ]; then
+            STATIONS_LIST=$(echo "$STATIONS" | tr ',' ' ')
+            ARGS="$ARGS --stations $STATIONS_LIST"
+          fi
+          python -u scripts/predict_4a.py $ARGS
+
+      - name: Push Phase 4a predictions to R2
+        # Same data/predictions/precipitation/ prefix as 3a/3c/3d so
+        # WeatherBlend's render scanner picks 4a up automatically (4a
+        # is in ActivePhasePolicy.ByTarget["precipitation"]).
+        env:
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          rclone copy ../WeatherBlend/data/predictions/precipitation \
+            "r2:${R2_BUCKET}/data/predictions/precipitation" \
+            --include '**/model_version=*phase4a*/**' \
+            --fast-list --transfers 16 --checkers 32 --progress
+
+      - name: Upload logs as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: predict-4a-${{ github.run_id }}
+          path: |
+            *.log
+            reports/
+          retention-days: 7
+          if-no-files-found: ignore

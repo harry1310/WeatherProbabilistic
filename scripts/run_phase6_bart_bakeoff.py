@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import pickle
 import sys
 import time
 from pathlib import Path
@@ -64,6 +65,7 @@ import arviz as az  # noqa: E402
 import lightgbm as lgb  # noqa: E402
 import pymc as pm  # noqa: E402
 import pymc_bart as pmb  # noqa: E402
+from sklearn.isotonic import IsotonicRegression  # noqa: E402
 from sklearn.preprocessing import StandardScaler  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -300,6 +302,82 @@ def fit_lightgbm_matched(
     return booster
 
 
+def fit_bayesian_logreg_blackjax(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    feature_names: list[str],
+    seed: int,
+    draws: int = 1000,
+    tune: int = 1000,
+    chains: int = 4,
+) -> tuple[pm.Model, az.InferenceData]:
+    """Fit a Bayesian logistic regression on the SAME training rows as
+    BART so the bake-off includes a "is the win from non-linearity (BART
+    trees) or just from being Bayesian?" diagnostic. Linear-in-features
+    so won't capture interactions BART can.
+
+    Sampler: NUTS via blackjax (JAX-compiled, ~5-10× faster than PyMC's
+    pure-Python NUTS on this size). For a 5k-row × 19-feature logreg
+    expect ~5-15 min wall.
+
+    Returns (model, idata). model wraps X as pm.Data so set_data works
+    at predict time.
+    """
+    print(f"  Bayesian logreg via blackjax NUTS: tune={tune}, draws={draws}, chains={chains}")
+    coords = {"feature": feature_names}
+    with pm.Model(coords=coords) as model:
+        X_data = pm.Data("X", X_train, dims=("row", "feature"))
+        y_data = pm.Data("y", y_train.astype("int8"), dims="row")
+        # Standard weakly-informative priors. Coefficients on standardised
+        # features (StandardScaler upstream), so unit-scale prior ≈ "doesn't
+        # expect more than ±2σ swing per feature".
+        intercept = pm.Normal("intercept", mu=0.0, sigma=2.5)
+        beta = pm.Normal("beta", mu=0.0, sigma=1.0, dims="feature")
+        logits = intercept + pm.math.dot(X_data, beta)
+        p = pm.Deterministic("p", pm.math.invlogit(logits), dims="row")
+        pm.Bernoulli("obs", p=p, observed=y_data, dims="row")
+        idata = pm.sample(
+            draws=draws, tune=tune, chains=chains,
+            random_seed=seed, target_accept=0.9,
+            nuts_sampler="blackjax",
+            return_inferencedata=True, progressbar=False,
+        )
+    return model, idata
+
+
+def predict_bayesian_logreg(model: pm.Model, idata: az.InferenceData,
+                            X_new: np.ndarray, seed: int = 123) -> np.ndarray:
+    """Posterior-mean P(wet) per row via set_data + posterior_predictive.
+    Same pattern as predict_bart — model has X + y wrapped as pm.Data."""
+    n_new = X_new.shape[0]
+    with model:
+        pm.set_data({"X": X_new, "y": np.zeros(n_new, dtype="int8")})
+        ppc = pm.sample_posterior_predictive(
+            idata, var_names=["p"], predictions=True,
+            random_seed=seed, progressbar=False,
+        )
+    p_post = ppc.predictions["p"].values
+    return p_post.mean(axis=(0, 1))
+
+
+def pav_calibrate(p_val: np.ndarray, y_val: np.ndarray,
+                  p_to_calibrate: np.ndarray) -> np.ndarray:
+    """Post-hoc PAV (pool-adjacent-violators) isotonic calibration.
+    Fits a monotonic step function on (val_pred, val_obs) pairs, then
+    transforms `p_to_calibrate`. Mirrors WeatherBlend's
+    DryWindowCalibrateCommand / Phase 3a-isotonic pattern.
+
+    Why on val and not on the train predictions: train-set predictions
+    are over-fit to the training labels — using them to calibrate would
+    just mirror that over-fit. Val is held out from training (post the
+    70/15 split, before test) so calibration on val applied to test
+    is honest.
+    """
+    iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
+    iso.fit(p_val, y_val)
+    return iso.transform(p_to_calibrate)
+
+
 def fit_bart(
     X_train: np.ndarray,
     y_train: np.ndarray,
@@ -374,14 +452,28 @@ def fit_bart(
     return model, idata
 
 
+def get_bart_trees(model: pm.Model, var_name: str = "mu"):
+    """Trees aren't saved in the InferenceData .nc file — they live on the
+    BART RV's op (`bartrv.owner.op.all_trees`). Without them, predict on a
+    new X falls back to a constant `Y.mean()` of the original training shape,
+    breaking when X_new has a different row count."""
+    return list(model.named_vars[var_name].owner.op.all_trees)
+
+
+def set_bart_trees(model: pm.Model, trees, var_name: str = "mu") -> None:
+    # `op.all_trees` is a multiprocessing ListProxy (no .clear() method).
+    # Drain via pop, then extend.
+    op = model.named_vars[var_name].owner.op
+    while len(op.all_trees) > 0:
+        op.all_trees.pop()
+    op.all_trees.extend(trees)
+
+
 def predict_bart(model: pm.Model, idata: az.InferenceData, X_new: np.ndarray, seed: int = 123) -> np.ndarray:
-    """Posterior-mean P(wet) per row of X_new. PyMC-BART 0.11 doesn't
-    expose a direct `BART.predict` (that was removed somewhere along the
-    API churn) so we use the canonical PyMC pattern: pm.set_data swaps
-    the X (and a placeholder y of the right size) into the model, then
-    sample_posterior_predictive evaluates the deterministic `p` per
-    posterior draw on the new X. The BART RV's tree state already lives
-    in idata; set_data on X doesn't refit, just re-evaluates."""
+    """Posterior-mean P(wet) per row of X_new. Uses pm.set_data + posterior
+    predictive sampling against the BART trees attached to the model's RV op.
+    Caller must ensure trees are present on the op (fresh fit or
+    set_bart_trees after rebuild)."""
     n_new = X_new.shape[0]
     with model:
         pm.set_data({"X": X_new, "y": np.zeros(n_new, dtype="int8")})
@@ -459,6 +551,16 @@ def main() -> None:
     p.add_argument("--draws", type=int, default=1500)
     p.add_argument("--chains", type=int, default=4)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--reuse-bart-posterior", action="store_true",
+                   help="Skip BART fit and load posterior.nc from the output "
+                        "directory (saves the ~3h training when only the logreg / "
+                        "PAV add-ons changed). The data prep + train/test "
+                        "split must match exactly so the saved trees apply "
+                        "to the same X.")
+    p.add_argument("--skip-logreg", action="store_true",
+                   help="Skip the Bayesian-logreg head-to-head. Default fits.")
+    p.add_argument("--skip-pav", action="store_true",
+                   help="Skip post-hoc PAV calibration of BART output. Default fits.")
     p.add_argument("--subsample-train", type=int, default=0,
                    help="Subsample training rows to N (stratified by wet label) "
                         "before fitting. 0 = no subsample. PyMC-BART's PGBART step "
@@ -561,23 +663,89 @@ def main() -> None:
     lgb_brier = brier(p_test_lgb, y_test)
     print(f"  done in {(time.time() - t_lgb):.1f}s, best iter {booster.best_iteration}")
 
-    # 3b. Fit BART (on standardised, median-imputed features).
-    print(f"[{time.strftime('%H:%M:%S')}] Training PyMC-BART…")
-    t0 = time.time()
-    model, idata = fit_bart(X_train_s, y_train, feature_names,
-                     n_trees=args.n_trees, tune=args.tune, draws=args.draws,
-                     chains=args.chains, seed=args.seed)
-    print(f"  done in {(time.time() - t0) / 60:.1f} min")
-
-    # 4. Score on the FULL test set (full 4-month slice, untouched by
-    # the training subsample).
-    print(f"[{time.strftime('%H:%M:%S')}] Scoring on test…")
-    p_test = predict_bart(model, idata, X_test_s, seed=args.seed)
-    bart_brier = brier(p_test, y_test)
+    # 3b. Fit BART (on standardised, median-imputed features) — or, in
+    # reuse mode, load the prior run's saved test predictions directly
+    # from predictions_test.parquet. We don't try to re-predict from a
+    # rebuilt model graph because the trees themselves aren't in the .nc
+    # (they live on `bartrv.owner.op.all_trees`); future runs save them
+    # via bart_trees.pkl, but we can't synthesise that retroactively for
+    # the existing posterior. Reuse path therefore can't produce val
+    # predictions, so PAV is auto-skipped.
+    posterior_path = out_dir / "posterior.nc"
+    trees_path = out_dir / "bart_trees.pkl"
+    test_preds_path = out_dir / "predictions_test.parquet"
     test_clim = train_df["wet"].mean()
     clim_brier = brier(np.full_like(y_test, test_clim, dtype="float64"), y_test)
+
+    if args.reuse_bart_posterior and posterior_path.exists() and test_preds_path.exists():
+        print(f"[{time.strftime('%H:%M:%S')}] Reusing saved BART test predictions at {test_preds_path}…")
+        prev = pd.read_parquet(test_preds_path)
+        if len(prev) != len(y_test):
+            raise SystemExit(
+                f"Saved predictions have {len(prev)} rows but current test set has {len(y_test)}. "
+                f"The data window has shifted — refit instead.")
+        p_test = prev["p_bart"].to_numpy()
+        if not args.skip_pav:
+            print(f"[{time.strftime('%H:%M:%S')}] WARN: --skip-pav implied — reuse path lacks val "
+                  f"predictions (trees not pickled in the saved run), so PAV can't be fit honestly. "
+                  f"Skipping PAV.")
+            args.skip_pav = True
+        model, idata = None, None
+    else:
+        print(f"[{time.strftime('%H:%M:%S')}] Training PyMC-BART…")
+        t0 = time.time()
+        model, idata = fit_bart(X_train_s, y_train, feature_names,
+                         n_trees=args.n_trees, tune=args.tune, draws=args.draws,
+                         chains=args.chains, seed=args.seed)
+        print(f"  done in {(time.time() - t0) / 60:.1f} min")
+        # Trees are stored on the BART RV op, not in the .nc — pickle them
+        # so future --reuse-bart-posterior runs can predict on new X.
+        with open(trees_path, "wb") as f:
+            pickle.dump(get_bart_trees(model), f)
+        print(f"  saved trees → {trees_path}")
+
+        print(f"[{time.strftime('%H:%M:%S')}] Scoring BART on test + val…")
+        p_test = predict_bart(model, idata, X_test_s, seed=args.seed)
+        if not args.skip_pav:
+            # Val features through the same imputation + standardiser used for
+            # train and test. Drop same dropped cols.
+            X_val_full_arr = val_df[FEATURE_NAMES].to_numpy(dtype="float64")[:, kept_idx]
+            X_val_imp = np.where(np.isnan(X_val_full_arr), median, X_val_full_arr)
+            X_val_s = scaler.transform(X_val_imp)
+            p_val = predict_bart(model, idata, X_val_s, seed=args.seed)
+
+    bart_brier = brier(p_test, y_test)
     bart_bss = (clim_brier - bart_brier) / clim_brier
     lgb_bss = (clim_brier - lgb_brier) / clim_brier
+
+    # 4b. PAV calibration. Fit isotonic on (val_pred, val_obs); apply to
+    # test predictions. Honest: val is held out of training, so the
+    # calibrator doesn't see what BART trained on. Skipped automatically
+    # in reuse mode (we don't have val predictions there).
+    if not args.skip_pav:
+        print(f"[{time.strftime('%H:%M:%S')}] Fitting PAV calibrator on val + applying to test…")
+        p_test_pav = pav_calibrate(p_val, y_val, p_test)
+        bart_pav_brier = brier(p_test_pav, y_test)
+        bart_pav_bss = (clim_brier - bart_pav_brier) / clim_brier
+    else:
+        p_test_pav, bart_pav_brier, bart_pav_bss = None, None, None
+
+    # 4c. Bayesian logreg head-to-head (same train rows, blackjax-NUTS).
+    if not args.skip_logreg:
+        print(f"[{time.strftime('%H:%M:%S')}] Training Bayesian logreg via blackjax…")
+        t_lr = time.time()
+        lr_model, lr_idata = fit_bayesian_logreg_blackjax(
+            X_train_s, y_train, feature_names, seed=args.seed,
+            tune=1000, draws=1000, chains=4,
+        )
+        print(f"  done in {(time.time() - t_lr) / 60:.1f} min")
+        p_test_lr = predict_bayesian_logreg(lr_model, lr_idata, X_test_s, seed=args.seed)
+        lr_brier = brier(p_test_lr, y_test)
+        lr_bss = (clim_brier - lr_brier) / clim_brier
+        # Save logreg posterior for later inspection if needed.
+        az.to_netcdf(lr_idata, str(out_dir / "logreg_posterior.nc"))
+    else:
+        lr_brier, lr_bss = None, None
 
     # 5. Deployed 3a baseline (for context only — DIFFERENT training set,
     # so not a fair comparison; useful as a "is the matched-LGB sane?"
@@ -589,14 +757,16 @@ def main() -> None:
         v_3a, brier_3a, n_test_3a, bss_3a = "(no 3a baseline found)", float("nan"), 0, float("nan")
         print(f"  WARN: {e}")
 
-    # 6. Save artefacts.
-    az.to_netcdf(idata, str(out_dir / "posterior.nc"))
-    pred_df = pd.DataFrame({
-        "valid_time": test_df["ValidTimeUtc"].values,
-        "p_bart": p_test,
-        "y_obs": y_test,
-    })
-    pred_df.to_parquet(out_dir / "predictions_test.parquet", index=False)
+    # 6. Save artefacts. In reuse mode `idata` is None and we leave the
+    # existing posterior.nc + predictions_test.parquet in place.
+    if idata is not None:
+        az.to_netcdf(idata, str(out_dir / "posterior.nc"))
+        pred_df = pd.DataFrame({
+            "valid_time": test_df["ValidTimeUtc"].values,
+            "p_bart": p_test,
+            "y_obs": y_test,
+        })
+        pred_df.to_parquet(out_dir / "predictions_test.parquet", index=False)
 
     rel = reliability_table(p_test, y_test)
 
@@ -620,7 +790,17 @@ def main() -> None:
         f"---------------------------",
         f"Climatology (constant test_clim={test_clim:.3f}):                  {clim_brier:.4f}",
         f"PyMC-BART  (this run, {len(train_df):,}-row train):                 {bart_brier:.4f}   BSS {bart_bss:+.4f}",
+    ]
+    if bart_pav_brier is not None:
+        report_lines.append(
+            f"PyMC-BART + PAV calibration (val-fit, test-applied):    {bart_pav_brier:.4f}   BSS {bart_pav_bss:+.4f}")
+    report_lines += [
         f"LightGBM   (matched, same {len(train_df):,}-row train):             {lgb_brier:.4f}   BSS {lgb_bss:+.4f}",
+    ]
+    if lr_brier is not None:
+        report_lines.append(
+            f"Bayesian-logreg (matched, same {len(train_df):,}-row train, blackjax NUTS): {lr_brier:.4f}   BSS {lr_bss:+.4f}")
+    report_lines += [
         f"3a deployed ({v_3a}, ~14k-row train, context only):  {brier_3a:.4f}   BSS {bss_3a:+.4f}",
         f"",
         f"PRIMARY: BART vs matched LightGBM (same training rows)",
@@ -630,6 +810,25 @@ def main() -> None:
         f"Sanity: matched LightGBM vs 3a deployed",
         f"  Δ Brier:  {lgb_brier - brier_3a:+.4f}  ({(lgb_brier - brier_3a) / brier_3a * 100:+.2f}%)",
         f"  expect positive (smaller training set → some loss); large gap means subsample is too small.",
+    ]
+    if bart_pav_brier is not None:
+        report_lines += [
+            f"",
+            f"PAV-calibrated BART vs raw BART (does post-hoc isotonic help?)",
+            f"  Δ Brier:  {bart_pav_brier - bart_brier:+.4f}  "
+            f"({(bart_pav_brier - bart_brier) / bart_brier * 100:+.2f}%)",
+            f"  negative = PAV improves Brier, positive = PAV hurts",
+        ]
+    if lr_brier is not None:
+        report_lines += [
+            f"",
+            f"DIAGNOSTIC: Bayesian logreg vs BART (is the BART win from non-linearity, or just from being Bayesian?)",
+            f"  Δ Brier (BART − logreg): {bart_brier - lr_brier:+.4f}  "
+            f"({(bart_brier - lr_brier) / lr_brier * 100:+.2f}%)",
+            f"  negative = BART (trees + Bayesian) beats logreg (linear + Bayesian) — non-linearity is the source",
+            f"  near-zero = logreg captures most of the signal; BART's win is mostly Bayesian-uncertainty",
+        ]
+    report_lines += [
         f"",
         f"Reliability (10 equal-width bins)",
         f"---------------------------------",
