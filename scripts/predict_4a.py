@@ -459,17 +459,25 @@ def write_metadata(out_models_dir: Path, station_slug: str, station_friendly: st
 
 
 def _json_sanitize_nans(obj):
-    """Recursively replace non-finite floats (NaN, ±inf) with None so
-    json.dumps(..., allow_nan=False) can serialise. Keeps everything else
-    untouched (including numpy types — json.dumps handles those via
-    default=str)."""
+    """Recursively replace non-finite floats (NaN, ±inf) with 0.0 so
+    json.dumps(..., allow_nan=False) can serialise.
+
+    Why 0.0 and not None: the WeatherBlend C# renderer's
+    `ModelArtifact.LeadMetrics` types BlendTestMae / BSS / etc. as
+    non-nullable `double`. Null trips System.Text.Json with "The JSON
+    value could not be converted to System.Double" and the entire model
+    summary fails to load. Existing convention (see the comment on
+    CalibratedBlendTestMae in ModelArtifact.cs) defaults non-measurable
+    metrics to 0.0; the ambiguity-with-real-zero is resolved by checking
+    TestRows == 0 alongside.
+    """
     import math
     if isinstance(obj, dict):
         return {k: _json_sanitize_nans(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
         return [_json_sanitize_nans(v) for v in obj]
     if isinstance(obj, float) and not math.isfinite(obj):
-        return None
+        return 0.0
     # numpy scalars expose __float__ — catch their NaN/inf the same way.
     if hasattr(obj, "__float__"):
         try:
@@ -477,7 +485,7 @@ def _json_sanitize_nans(obj):
         except (TypeError, ValueError):
             return obj
         if not math.isfinite(f):
-            return None
+            return 0.0
     return obj
 
 
