@@ -1,27 +1,30 @@
-name: predict-4a
+name: train-4a
 
-# Phase 4a (dbarts BART) PREDICT — loads the saved state bundle minted
-# by train-4a.yml, applies it to fresh live forecast features, writes
-# predictions parquet under the existing version. Runs 4× per day on the
-# Cloudflare 03/09/15/21 UTC tick (same tick as predict-5a, different
-# repo + R2 prefix so no contention).
+# Phase 4a (dbarts BART) TRAINING ONLY — fits the precip P(wet) blender
+# once and writes a versioned bundle (state.rds + arrays.npz +
+# preprocess.json + training_metadata.json + feature_schema.json) to R2.
+# predict-4a.yml then loads that bundle on the 6-hourly cycle.
 #
-# Pre-split this workflow ALSO trained on each daily run (~24 min wall).
-# Now training is its own workflow; the predict cycle just rehydrates
-# the saved state via warm-scaffold + setState (~30s wall) and predicts.
-# See train-4a.yml + scripts/predict_4a.py for the load mechanics, and
-# scripts/smoke_dbarts_roundtrip.py for the verified round-trip.
+# Pre-split, train+predict ran together in predict-4a.yml on a daily
+# cron (~24 min wall) because earlier (incorrect) experiments suggested
+# dbarts trees couldn't survive saveRDS. We later verified the round-
+# trip works bit-exactly via storeState() + setState() (see
+# scripts/smoke_dbarts_roundtrip.py and the reference memory). Splitting
+# unlocks 6-hourly predict refresh while training stays at training cost.
 #
-# Failure path: WorkflowRun completed events with conclusion=failure
-# trigger the cross-repo /github-webhook handler in the Cloudflare
-# scheduler-worker, which auto-files a `[ci-fail] predict-4a` issue
-# under the `ci-failure` label.
+# Trigger: workflow_dispatch only by default — the model is stable
+# enough to retrain on demand rather than on a cron. Add a weekly cron
+# here if drift becomes a concern; the first thing to watch is the
+# rolling Brier on the Models card.
+#
+# Cost: ~24 min wall (3 stations × ~8 min each, 84k pooled rows per fit
+# at champion config ntree=500, ndpost=1000).
 
 on:
   workflow_dispatch:
     inputs:
       anchor:
-        description: "Anchor date YYYY-MM-DD (UTC). Empty = today."
+        description: "Anchor date YYYY-MM-DD (UTC) for the version string. Empty = today."
         required: false
         type: string
       stations:
@@ -30,17 +33,17 @@ on:
         type: string
 
 concurrency:
-  # Per-repo lock — predict-5a.yml writes to a different prefix
-  # (*phase5a* vs *phase4a*) so no shared lock between them. Per-anchor
-  # serialisation via the cron group keeps two close-together cycles
-  # from racing each other on R2 reads.
-  group: weatherprobabilistic-4a
+  # train-4a writes versioned dirs under data/models/precipitation/.../v*_phase4a/.
+  # Two same-day runs would just produce two adjacent versions; the predict
+  # side picks the latest by lexicographic name. Still, serialise to keep
+  # R2 consistent and avoid wasted compute.
+  group: weatherprobabilistic-train-4a
   cancel-in-progress: false
 
 jobs:
-  predict-4a:
+  train-4a:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -49,10 +52,10 @@ jobs:
           python-version: "3.12"
 
       - name: Install R + dbarts
-        # rpy2 + dbarts must be present even at predict time — the warm
-        # scaffold is built via dbarts::bart() then setState injects the
-        # saved trees. ABI-mode rpy2 dlopens libR at import time so we
-        # need the same libtirpc-dev + python3-dev pair as the train job.
+        # Same install incantation as predict-4a.yml. R must land BEFORE
+        # rpy2 (rpy2's wheel build sniffs `R RHOME` at install time);
+        # libtirpc-dev + python3-dev satisfy rpy2-rinterface's link check
+        # even in ABI mode.
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends r-base r-base-dev libtirpc-dev python3-dev
@@ -63,6 +66,9 @@ jobs:
           R -e 'library(dbarts); cat("dbarts version:", as.character(packageVersion("dbarts")), "\n")'
 
       - name: Install Python deps
+        # rpy2<3.6 because rpy2 3.6+ references R_getVar (R 4.5+) which
+        # Ubuntu 24.04's r-base 4.4 doesn't expose; ABI mode skips the
+        # native build that needs libR-dev linker config.
         env:
           RPY2_CFFI_MODE: ABI
         run: |
@@ -92,12 +98,11 @@ jobs:
           acl = private
           EOF
 
-      - name: Pull live forecast tree + saved BART bundles from R2
-        # Live forecast tree (RunTimeSource='reported') for prediction
-        # features. NO truth pull — predict has no labels to join.
-        # Saved bundles (state.rds + arrays.npz + preprocess.json + the
-        # two metadata json files) come from train-4a.yml; predict reads
-        # the latest *phase4a* version dir per station.
+      - name: Pull forecast tree + EA truth from R2
+        # Training needs both: the 7-NWP forecast tree (offset_day archive
+        # for historical features) AND the EA rainfall truth for labels.
+        # predict-4a.yml drops the truth pull because predict-time has no
+        # labels to join.
         env:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
@@ -107,15 +112,14 @@ jobs:
               "../WeatherBlend/data/forecasts/location=bonehill_rocks/model=$m" \
               --fast-list --transfers 16 --checkers 32
           done
-          mkdir -p ../WeatherBlend/data/models/precipitation
-          rclone copy "r2:${R2_BUCKET}/data/models/precipitation" \
-            ../WeatherBlend/data/models/precipitation \
-            --include '**/*phase4a*/**' \
+          mkdir -p ../WeatherBlend/data/truth/rainfall
+          rclone copy "r2:${R2_BUCKET}/data/truth/rainfall" \
+            ../WeatherBlend/data/truth/rainfall \
             --fast-list --transfers 16 --checkers 32
 
-      - name: Run Phase 4a state-load + predict
-        # ~30s warm scaffold + predict per station. Total wall under 2 min
-        # for 3 stations — 95% reduction vs the old daily train+predict.
+      - name: Run Phase 4a training
+        # ~24 min wall (3 stations sequentially). Emits one bundle dir
+        # per station under ../WeatherBlend/data/models/precipitation/{station}/v..._phase4a/.
         env:
           WEATHERBLEND_DATA_ROOT: ${{ github.workspace }}/../WeatherBlend/data
           R_HOME: /usr/lib/R
@@ -130,26 +134,26 @@ jobs:
             STATIONS_LIST=$(echo "$STATIONS" | tr ',' ' ')
             ARGS="$ARGS --stations $STATIONS_LIST"
           fi
-          python -u scripts/predict_4a.py $ARGS
+          python -u scripts/train_4a.py $ARGS
 
-      - name: Push Phase 4a predictions to R2
-        # Predictions only — bundle dirs are train-4a.yml's territory.
-        # Multiple predict cycles writing under the same model_version
-        # but different date= partitions is the intended pattern; same-
-        # day overwrites are idempotent.
+      - name: Push Phase 4a model bundles to R2
+        # Only the models tree — predictions are predict-4a.yml's job.
+        # The version dir contains state.rds + arrays.npz + preprocess.json
+        # alongside the existing training_metadata.json + feature_schema.json
+        # files the WeatherBlend renderer already reads.
         env:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
-          rclone copy ../WeatherBlend/data/predictions/precipitation \
-            "r2:${R2_BUCKET}/data/predictions/precipitation" \
-            --include '**/model_version=*phase4a*/**' \
+          rclone copy ../WeatherBlend/data/models/precipitation \
+            "r2:${R2_BUCKET}/data/models/precipitation" \
+            --include '**/*phase4a*/**' \
             --fast-list --transfers 16 --checkers 32 --progress
 
       - name: Upload logs as artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: predict-4a-${{ github.run_id }}
+          name: train-4a-${{ github.run_id }}
           path: |
             *.log
             reports/
