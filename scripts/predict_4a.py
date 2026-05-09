@@ -502,6 +502,12 @@ def main() -> None:
         if len(live_preds) == 0:
             print(f"  no live predictions emitted for {station_slug}")
             continue
+        # LocationName must match the C# renderer's location filter
+        # (RenderSiteCommand → GetPrecipitationPredictions has
+        # `WHERE LocationName = '<config.location.name>'`). Without it,
+        # union_by_name fills NULL on read, the WHERE filter drops every
+        # 4a row, and 4a never appears on the site.
+        live_preds["LocationName"] = LOCATION
         live_preds["ModelVersion"] = version
         live_preds["TruthStation"] = station_slug
         live_preds["PredictionMadeAtUtc"] = datetime.now(timezone.utc).replace(tzinfo=None)

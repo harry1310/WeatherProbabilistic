@@ -355,6 +355,7 @@ def main() -> None:
             "ProbWetQ95":      summary["q0.95"],
             "Ci80Width":       summary["q0.9"] - summary["q0.1"],
             "Ci90Width":       summary["q0.95"] - summary["q0.05"],
+            "LocationName":    LOCATION,
             "ModelVersion":    version,
             "TruthStation":    station_slug,
             "PredictionMadeAtUtc": prediction_made_at,
