@@ -74,8 +74,15 @@ jobs:
 
       - name: Install Python deps
         # rpy2 install MUST follow the R install above so its wheel-build
-        # cffi sniff finds R on PATH. Otherwise: "Unable to determine R
-        # home" and the workflow fails before any predict logic runs.
+        # cffi sniff finds R on PATH. Even with R present the API-mode
+        # wheel build fails at the gcc link step on stock GH runners
+        # (no libR-dev linker config out of the box). RPY2_CFFI_MODE=ABI
+        # tells rpy2 to skip the C extension and dlopen libR at runtime
+        # — same R API surface, no compile dependency. Officially
+        # supported fallback path; performance penalty is negligible
+        # for our usage (we call R functions, not tight per-row loops).
+        env:
+          RPY2_CFFI_MODE: ABI
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
@@ -127,6 +134,10 @@ jobs:
           WEATHERBLEND_DATA_ROOT: ${{ github.workspace }}/../WeatherBlend/data
           R_HOME: /usr/lib/R
           R_LIBS_USER: /home/runner/R/x86_64-pc-linux-gnu-library/4.4
+          # ABI mode — match the install env above so rpy2 dlopens libR
+          # at import time instead of trying to load a non-existent C
+          # extension (we never built one).
+          RPY2_CFFI_MODE: ABI
         run: |
           ANCHOR="${{ github.event.inputs.anchor }}"
           STATIONS="${{ github.event.inputs.stations }}"
