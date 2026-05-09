@@ -102,7 +102,16 @@ HORIZON_DAYS = 7
 def build_pooled_training_features(station_friendly: str) -> pd.DataFrame:
     """Pull training rows for ALL leads in LEADS, pool with `lead` column.
     Returns a DataFrame with the 22 base + 3 synoptic + 1 `lead` columns
-    plus the wet/dry label."""
+    plus the wet/dry label.
+
+    SORT ORDER MATTERS: time_split downstream is a positional 70/15/15
+    slice; if rows stayed in the lead-block order produced by the loop
+    below (all lead 12, then all lead 24, ...) the test slice would end
+    up entirely lead 120 + tail of lead 96 and PerLead test Brier for
+    leads 12-72 would be 0 (TestRows=0). Sort by (ValidTimeUtc, lead)
+    so the positional split crosses every lead at each time, and each
+    lead gets a proportional 15% test contribution.
+    """
     frames = []
     for lead in LEADS:
         df = build_features_via_duckdb(station_friendly, lead)
@@ -110,6 +119,7 @@ def build_pooled_training_features(station_friendly: str) -> pd.DataFrame:
         df["lead"] = float(lead)
         frames.append(df)
     pooled = pd.concat(frames, ignore_index=True)
+    pooled = pooled.sort_values(["ValidTimeUtc", "lead"], kind="mergesort").reset_index(drop=True)
     return pooled
 
 
