@@ -55,18 +55,14 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install Python deps
-        # Same requirements.txt as predict-5a; rpy2 added 2026-05-09
-        # for the R bridge.
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install rpy2
-
       - name: Install R + dbarts
-        # Apt's r-base + r-base-dev let dbarts compile from CRAN source
-        # in ~2 min on a standard runner. R-level lib path under user
-        # home so we don't need sudo on every install.
+        # MUST run before `pip install rpy2` — rpy2's wheel build sniffs
+        # `R RHOME` at install time to locate the R headers; without R
+        # on PATH it errors "Unable to determine R home" and the workflow
+        # dies before Python deps even resolve. Apt's r-base + r-base-dev
+        # let dbarts compile from CRAN source in ~2 min on a standard
+        # runner. R-level lib path under user home so we don't need sudo
+        # on every install.
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends r-base r-base-dev
@@ -75,6 +71,15 @@ jobs:
           echo 'R_LIBS_USER=~/R/x86_64-pc-linux-gnu-library/4.4' >> ~/.Renviron
           R -e 'install.packages("dbarts", repos="https://cloud.r-project.org", lib=Sys.getenv("R_LIBS_USER"))'
           R -e 'library(dbarts); cat("dbarts version:", as.character(packageVersion("dbarts")), "\n")'
+
+      - name: Install Python deps
+        # rpy2 install MUST follow the R install above so its wheel-build
+        # cffi sniff finds R on PATH. Otherwise: "Unable to determine R
+        # home" and the workflow fails before any predict logic runs.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install rpy2
 
       - name: Install rclone
         run: |
