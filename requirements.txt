@@ -10,3 +10,6 @@ matplotlib>=3.8
 # so PyTensor's C backend is unavailable). Requires numba at runtime.
 nutpie>=0.16
 numba>=0.60
+# DuckDB powers the schema-tolerant parquet reader used by predict_4a /
+# predict_5a / the bake-off scripts (hive_partitioning + union_by_name).
+duckdb>=1.0
