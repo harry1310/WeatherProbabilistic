@@ -443,11 +443,42 @@ def write_metadata(out_models_dir: Path, station_slug: str, station_friendly: st
     schema = {"Leads": schema_per_lead}
 
     out_models_dir.mkdir(parents=True, exist_ok=True)
+    # allow_nan=False so float("nan") / float("inf") never sneak into the
+    # output. C# System.Text.Json (the WeatherBlend renderer's parser)
+    # rejects literal NaN / Infinity tokens — strict JSON spec — and
+    # silently drops the entire model summary, which is why 4a was
+    # invisible even after LocationName landed. Convert non-finite floats
+    # to None first so they serialise as `null` (System.Text.Json reads
+    # null fine into nullable doubles via the existing reader).
+    metadata = _json_sanitize_nans(metadata)
     (out_models_dir / "training_metadata.json").write_text(
-        json.dumps(metadata, indent=2, default=str))
+        json.dumps(metadata, indent=2, default=str, allow_nan=False))
     (out_models_dir / "feature_schema.json").write_text(
-        json.dumps(schema, indent=2))
+        json.dumps(schema, indent=2, allow_nan=False))
     print(f"  metadata → {out_models_dir}")
+
+
+def _json_sanitize_nans(obj):
+    """Recursively replace non-finite floats (NaN, ±inf) with None so
+    json.dumps(..., allow_nan=False) can serialise. Keeps everything else
+    untouched (including numpy types — json.dumps handles those via
+    default=str)."""
+    import math
+    if isinstance(obj, dict):
+        return {k: _json_sanitize_nans(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_sanitize_nans(v) for v in obj]
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return None
+    # numpy scalars expose __float__ — catch their NaN/inf the same way.
+    if hasattr(obj, "__float__"):
+        try:
+            f = float(obj)
+        except (TypeError, ValueError):
+            return obj
+        if not math.isfinite(f):
+            return None
+    return obj
 
 
 def main() -> None:
