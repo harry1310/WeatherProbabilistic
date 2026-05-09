@@ -36,7 +36,7 @@ from sklearn.preprocessing import StandardScaler
 
 # Local default points at the WeatherBlend sibling checkout on the dev
 # machine. CI / cron / non-Windows callers override via the
-# WEATHERBLEND_DATA_ROOT environment variable — the predict-bayesian.yml
+# WEATHERBLEND_DATA_ROOT environment variable — the predict-5a.yml
 # workflow sets this to the runner-relative path it rclone-copies into.
 WEATHERBLEND_DATA_ROOT = Path(
     os.environ.get("WEATHERBLEND_DATA_ROOT")

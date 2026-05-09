@@ -1,0 +1,16 @@
+Phase 6 — dbarts hyperparameter sweep at full 14k
+==================================================
+
+Climatology Brier: 0.2264
+
+stage  ntree   k  wall_s  brier    bss
+    1     50 2.0    10.8 0.1260 0.4437
+    1    100 2.0    19.0 0.1276 0.4366
+    1    200 2.0    36.7 0.1244 0.4503
+    1    500 2.0    96.1 0.1236 0.4543
+    2    500 1.0   101.9 0.1295 0.4281
+    2    500 2.0    96.1 0.1236 0.4543
+    2    500 3.0   100.7 0.1224 0.4594
+
+Best config: ntree=500, k=3.0 → Brier 0.1224
+For comparison: 5k subsample winner ntree=50 → Brier 0.1207; 14k @ ntree=50 → Brier 0.1260; 3a deployed (LightGBM 14k) → 0.1267

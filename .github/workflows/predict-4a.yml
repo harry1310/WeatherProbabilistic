@@ -37,10 +37,10 @@ on:
         type: string
 
 concurrency:
-  # Don't share lock with predict-bayesian — they touch different R2
-  # prefixes (precipitation_bayesian_ci/ vs precipitation/{station}/...
-  # phase4a) and can run in parallel without conflict. Per-anchor lock
-  # so two manually-triggered same-anchor runs don't race.
+  # Don't share lock with predict-5a — they write under distinct
+  # model_version=*phase4a* / *phase5a* prefixes and can run in parallel
+  # without conflict. Per-anchor lock so two manually-triggered
+  # same-anchor runs don't race.
   group: weatherprobabilistic-4a
   cancel-in-progress: false
 
@@ -56,7 +56,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install Python deps
-        # Same requirements.txt as predict-bayesian; rpy2 added 2026-05-09
+        # Same requirements.txt as predict-5a; rpy2 added 2026-05-09
         # for the R bridge.
         run: |
           python -m pip install --upgrade pip

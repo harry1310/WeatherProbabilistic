@@ -268,11 +268,18 @@ def train_and_predict_one_station(station_friendly: str, anchor: datetime) -> di
     yhat_holdouts_r = fit.rx2("yhat.test")
     with localconverter(_RCONVERT):
         yhat = np.array(ro.conversion.rpy2py(yhat_holdouts_r))
-    p_holdouts = norm.cdf(yhat).mean(axis=0)
+    # Per-draw P(wet) over (1000 draws, n_holdouts) — full posterior
+    # distribution. We keep it for downstream uncertainty quantification
+    # (matches Phase 5a's CI columns); the headline ProbWet is the mean
+    # over draws.
+    p_draws_holdouts = norm.cdf(yhat)             # (ndpost, n_holdouts)
+    p_holdouts = p_draws_holdouts.mean(axis=0)    # posterior mean
     print(f"  fit done in {(time.time() - t0) / 60:.1f} min", flush=True)
 
     p_test = p_holdouts[:n_test]
     p_live = p_holdouts[n_test:] if n_live > 0 else np.zeros(0, dtype="float64")
+    p_draws_live = (p_draws_holdouts[:, n_test:] if n_live > 0
+                    else np.zeros((p_draws_holdouts.shape[0], 0), dtype="float64"))
 
     # Per-lead test Brier (for the Models page card).
     per_lead = []
@@ -311,10 +318,27 @@ def train_and_predict_one_station(station_friendly: str, anchor: datetime) -> di
 
     live_preds = pd.DataFrame()
     if has_live and n_live > 0:
+        # CI columns mirror Phase 5a's schema so the WeatherBlend renderer
+        # can read uncertainty from either phase via the same column names.
+        # Quantiles use np.quantile across the 1000-draw posterior axis;
+        # ci80/ci90 widths are the q10..q90 / q05..q95 spans.
+        q05 = np.quantile(p_draws_live, 0.05, axis=0)
+        q10 = np.quantile(p_draws_live, 0.10, axis=0)
+        q50 = np.quantile(p_draws_live, 0.50, axis=0)
+        q90 = np.quantile(p_draws_live, 0.90, axis=0)
+        q95 = np.quantile(p_draws_live, 0.95, axis=0)
         live_preds = pd.DataFrame({
             "ValidTimeUtc": df_live["ValidTimeUtc"],
             "LeadHours":    df_live["lead"].astype(int),
             "ProbWet":      p_live,
+            "ProbWetStd":   p_draws_live.std(axis=0),
+            "ProbWetQ05":   q05,
+            "ProbWetQ10":   q10,
+            "ProbWetQ50":   q50,
+            "ProbWetQ90":   q90,
+            "ProbWetQ95":   q95,
+            "Ci80Width":    q90 - q10,
+            "Ci90Width":    q95 - q05,
         })
 
     return {

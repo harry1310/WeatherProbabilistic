@@ -1,0 +1,25 @@
+Phase 6 — autoregressive-gauge feature experiment
+==================================================
+
+Station: Bellever Dartmoor, lead 24h, 5,000 train rows, ntree=50
+Features: 26 (19 original + 7 new autoregressive)
+
+Test Brier: 0.1239   BSS +0.4527
+Baseline (22 features, ntree=50): 0.1207
+Δ Brier (autoreg − baseline): +0.0032  (+2.66%)
+  negative = autoregressive features improved Brier
+
+Wall: 5.4s
+
+Reliability — autoreg dbarts test predictions
+---------------------------------------------
+  [0.00,0.10)  n=1131  p_mean=0.034  y_rate=0.020  diff=-0.014
+  [0.10,0.20)  n= 276  p_mean=0.145  y_rate=0.167  diff=+0.021
+  [0.20,0.30)  n= 213  p_mean=0.248  y_rate=0.254  diff=+0.006
+  [0.30,0.40)  n= 176  p_mean=0.349  y_rate=0.324  diff=-0.025
+  [0.40,0.50)  n= 190  p_mean=0.450  y_rate=0.405  diff=-0.044
+  [0.50,0.60)  n= 162  p_mean=0.553  y_rate=0.488  diff=-0.065
+  [0.60,0.70)  n= 180  p_mean=0.649  y_rate=0.567  diff=-0.083
+  [0.70,0.80)  n= 147  p_mean=0.748  y_rate=0.592  diff=-0.157
+  [0.80,0.90)  n= 162  p_mean=0.849  y_rate=0.772  diff=-0.077
+  [0.90,1.00)  n= 350  p_mean=0.962  y_rate=0.911  diff=-0.051

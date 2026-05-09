@@ -29,7 +29,7 @@ hour from the same single posterior.
 Saves
 -----
 Single posterior NetCDF at
-  reports/phase5_artefacts/posteriors/lead_feature.nc
+  reports/phase5a_artefacts/posteriors/lead_feature.nc
 plus a per-row test predictions parquet keyed by (valid_time, station,
 lead) so evaluation can stay per-cell for direct comparison against
 Phase 4's per-lead Brier numbers.
@@ -65,7 +65,7 @@ from src.models.phase2_partial_pooling import (  # noqa: E402
     fit_partial_pooling, predict_partial_pooling,
 )
 
-OUT_DIR = ROOT / "reports" / "phase5_artefacts"
+OUT_DIR = ROOT / "reports" / "phase5a_artefacts"
 POSTERIOR_DIR = OUT_DIR / "posteriors"
 PREDICTIONS_DIR = OUT_DIR / "predictions"
 

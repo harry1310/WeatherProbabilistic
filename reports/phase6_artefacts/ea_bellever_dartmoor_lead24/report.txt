@@ -1,0 +1,41 @@
+Phase 6 — PyMC-BART vs LightGBM-3a head-to-head
+================================================
+
+Station:      ea_bellever_dartmoor
+Lead hours:   24
+BART config:  m=5, tune=250, draws=250, chains=4, seed=42
+
+Data
+----
+Total rows:   19,908 (wet rate 26.8%)
+Train:        5,000 (2024-01-19 14:00:00 → 2025-08-23 00:00:00)
+Val:          2,986 (2025-08-23 01:00:00 → 2025-12-25 11:00:00)
+Test:         2,987 (2025-12-25 12:00:00 → 2026-04-28 23:00:00)
+
+Test Brier (lower = better)
+---------------------------
+Climatology (constant test_clim=0.239):                  0.2264
+PyMC-BART  (this run, 5,000-row train):                 0.1209   BSS +0.4659
+LightGBM   (matched, same 5,000-row train):             0.1251   BSS +0.4475
+3a deployed (v2026-04-28_232709, ~14k-row train, context only):  0.1267   BSS +0.4402
+
+PRIMARY: BART vs matched LightGBM (same training rows)
+  Δ Brier:  -0.0042  (-3.34%)
+  negative = BART wins on this subsample, positive = LightGBM wins
+
+Sanity: matched LightGBM vs 3a deployed
+  Δ Brier:  -0.0016  (-1.30%)
+  expect positive (smaller training set → some loss); large gap means subsample is too small.
+
+Reliability (10 equal-width bins)
+---------------------------------
+  [0.00,0.10)  n=1267  p_mean=0.047  y_rate=0.038  diff=-0.009
+  [0.10,0.20)  n= 193  p_mean=0.153  y_rate=0.181  diff=+0.029
+  [0.20,0.30)  n= 262  p_mean=0.247  y_rate=0.240  diff=-0.007
+  [0.30,0.40)  n= 170  p_mean=0.348  y_rate=0.371  diff=+0.022
+  [0.40,0.50)  n= 182  p_mean=0.451  y_rate=0.418  diff=-0.034
+  [0.50,0.60)  n= 218  p_mean=0.551  y_rate=0.573  diff=+0.023
+  [0.60,0.70)  n= 225  p_mean=0.647  y_rate=0.631  diff=-0.016
+  [0.70,0.80)  n= 254  p_mean=0.754  y_rate=0.839  diff=+0.085
+  [0.80,0.90)  n= 216  p_mean=0.831  y_rate=0.944  diff=+0.113
+  [0.90,1.00)  n=0

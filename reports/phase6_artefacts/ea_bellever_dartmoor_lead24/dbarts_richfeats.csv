@@ -1,0 +1,4 @@
+variant,n_feats_eff,wall_s,brier,bss,delta_vs_baseline
+v1 synoptic only,22,5.6,0.1182,0.4778,-0.0025
+v2 rolling only,33,5.1,0.1258,0.4442,0.0051
+v3 both,36,5.3,0.1215,0.4632,0.0008

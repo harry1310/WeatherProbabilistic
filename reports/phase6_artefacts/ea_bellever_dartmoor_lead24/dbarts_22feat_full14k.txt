@@ -1,0 +1,25 @@
+Phase 6 — 22-feat dbarts on full 14k train
+===========================================
+
+Train rows: 13,935 (no subsample)
+Test rows:  2,987 (2025-12-25 12:00:00 → 2026-04-28 23:00:00)
+Features:   22 requested → 19 effective (3 dropped)
+Config:     ntree=50, 200 burn, 1000 samples, seed 42
+Wall:       12.1s
+
+Test Brier: 0.1260   BSS +0.4437
+  vs 5k 22-feat baseline (0.1207):  +0.0053
+  vs 5k synoptic-best (0.1182):     +0.0078
+
+Reliability (10 equal-width bins)
+---------------------------------
+  [0.00,0.10)  n=1196  p_mean=0.045  y_rate=0.045  diff=-0.000
+  [0.10,0.20)  n= 427  p_mean=0.142  y_rate=0.213  diff=+0.071
+  [0.20,0.30)  n= 211  p_mean=0.248  y_rate=0.313  diff=+0.065
+  [0.30,0.40)  n= 201  p_mean=0.352  y_rate=0.353  diff=+0.001
+  [0.40,0.50)  n= 160  p_mean=0.451  y_rate=0.425  diff=-0.026
+  [0.50,0.60)  n= 165  p_mean=0.548  y_rate=0.612  diff=+0.064
+  [0.60,0.70)  n= 134  p_mean=0.647  y_rate=0.649  diff=+0.002
+  [0.70,0.80)  n= 118  p_mean=0.744  y_rate=0.780  diff=+0.036
+  [0.80,0.90)  n= 143  p_mean=0.852  y_rate=0.825  diff=-0.027
+  [0.90,1.00)  n= 232  p_mean=0.962  y_rate=0.953  diff=-0.009

@@ -1,0 +1,15 @@
+Phase 6 — full 9-cell BART vs deployed 3a (ntree=500, k=3.0)
+================================================================
+
+                 station  lead  n_train  n_test  n_feats_eff  wall_s  bart_brier  bart_bss  deployed_3a_brier  delta_brier  delta_pct
+    ea_bellever_dartmoor    24    13935    2987           22   278.3      0.1167    0.4845             0.1267      -0.0100      -7.90
+    ea_bellever_dartmoor    48    13918    2984           22   301.4      0.1288    0.4315             0.1394      -0.0107      -7.65
+    ea_bellever_dartmoor    72    13902    2979           22   357.9      0.1436    0.3671             0.1548      -0.0112      -7.24
+ea_dartmoor_nr_hexworthy    24    13949    2990           22   354.3      0.1315    0.4486             0.1413      -0.0098      -6.93
+ea_dartmoor_nr_hexworthy    48    13932    2987           22   243.8      0.1454    0.3907             0.1556      -0.0102      -6.57
+ea_dartmoor_nr_hexworthy    72    13916    2982           22   242.1      0.1547    0.3515             0.1656      -0.0108      -6.55
+         ea_bovey_tracey    24    13442    2881           22   278.5      0.0989    0.4810             0.1017      -0.0028      -2.73
+         ea_bovey_tracey    48    13425    2878           22   437.7      0.1164    0.3895             0.1174      -0.0010      -0.88
+         ea_bovey_tracey    72    13408    2874           22   612.1      0.1235    0.3533             0.1297      -0.0063      -4.83
+
+Negative delta_brier = BART wins.

@@ -1,0 +1,42 @@
+Phase 6 — dbarts (R) BART vs context
+=====================================
+
+Station:         ea_bellever_dartmoor
+Lead hours:      24
+Train rows:      5,000 (subsampled, seed 42)
+Test rows:       2,987 (2025-12-25 12:00:00 → 2026-04-28 23:00:00)
+Features:        19
+dbarts cfg:      ntree=200, nburn=200, nsamples=1000
+
+Wall-clock
+----------
+dbarts:          31.9s
+matched LGB:     1.6s
+PyMC-BART:       ~10800s (3 hours) — saved from prior run
+
+Test Brier (lower = better)
+---------------------------
+Climatology (constant 0.239):                  0.2264
+dbarts (R, this run, 5,000-row train, 200 trees):  0.1208   BSS +0.4663
+PyMC-BART (prior, same 5k train, 5 trees, context):  0.1209   BSS +0.4659
+Bayesian logreg (prior, same 5k train, blackjax):    0.1228   BSS +0.4576
+LightGBM matched (this run, 5k train, NaN-preserving):  0.1261   BSS +0.4430
+3a deployed (v2026-04-28_232709, ~14k train, context):  0.1267   BSS +0.4402
+
+dbarts vs PyMC-BART (more trees + faster sampler — does it move Brier?)
+  Δ Brier (dbarts − pmb): -0.0001  (-0.07%)
+  negative = dbarts wins (more trees pay off), positive = PyMC-BART wins (despite 5 trees)
+  speedup: 338× faster
+
+Reliability — dbarts test predictions (10 equal-width bins)
+------------------------------------------------------------
+  [0.00,0.10)  n=1188  p_mean=0.042  y_rate=0.036  diff=-0.006
+  [0.10,0.20)  n= 352  p_mean=0.139  y_rate=0.170  diff=+0.032
+  [0.20,0.30)  n= 197  p_mean=0.245  y_rate=0.274  diff=+0.029
+  [0.30,0.40)  n= 171  p_mean=0.354  y_rate=0.327  diff=-0.026
+  [0.40,0.50)  n= 189  p_mean=0.449  y_rate=0.460  diff=+0.011
+  [0.50,0.60)  n= 159  p_mean=0.553  y_rate=0.566  diff=+0.013
+  [0.60,0.70)  n= 163  p_mean=0.647  y_rate=0.601  diff=-0.046
+  [0.70,0.80)  n= 121  p_mean=0.751  y_rate=0.661  diff=-0.090
+  [0.80,0.90)  n= 147  p_mean=0.851  y_rate=0.823  diff=-0.028
+  [0.90,1.00)  n= 300  p_mean=0.958  y_rate=0.933  diff=-0.025

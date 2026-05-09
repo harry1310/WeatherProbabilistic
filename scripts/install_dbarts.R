@@ -1,0 +1,5 @@
+user_lib <- file.path(Sys.getenv("USERPROFILE"), "R", "win-library", "4.6")
+dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
+.libPaths(c(user_lib, .libPaths()))
+install.packages("dbarts", repos = "https://cloud.r-project.org", lib = user_lib)
+cat("dbarts version: ", as.character(packageVersion("dbarts")), "\n", sep = "")

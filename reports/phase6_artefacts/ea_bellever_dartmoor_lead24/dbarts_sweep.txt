@@ -1,0 +1,11 @@
+Phase 6 — dbarts sweep (ntree × PAV)
+====================================
+
+Climatology Brier: 0.2264
+
+ ntree  wall_s  brier_raw  bss_raw  brier_pav  bss_pav  delta_pav
+    50    12.1     0.1207   0.4667     0.1205   0.4678    -0.0002
+   100    21.3     0.1211   0.4652     0.1211   0.4649     0.0001
+   200    41.5     0.1208   0.4663     0.1210   0.4653     0.0002
+
+Lower brier_raw / brier_pav is better. delta_pav<0 = PAV improves.

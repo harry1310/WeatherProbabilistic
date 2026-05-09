@@ -3,11 +3,11 @@ generate the report and plots.
 
 Outputs:
   reports/phase5_report.md
-  reports/phase5_artefacts/heatmap_<station>_<date>_lead<L>h.png
-  reports/phase5_artefacts/sensitivity_n_samples.csv
-  reports/phase5_artefacts/sensitivity_seed_stability.csv
-  reports/phase5_artefacts/calibration_check.csv
-  reports/phase5_artefacts/comparison_vs_lightgbm.csv
+  reports/phase5a_artefacts/heatmap_<station>_<date>_lead<L>h.png
+  reports/phase5a_artefacts/sensitivity_n_samples.csv
+  reports/phase5a_artefacts/sensitivity_seed_stability.csv
+  reports/phase5a_artefacts/calibration_check.csv
+  reports/phase5a_artefacts/comparison_vs_lightgbm.csv
 """
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ from src.simulation.core import (  # noqa: E402
 
 warnings.filterwarnings("ignore")
 
-ARTEFACTS = ROOT / "reports" / "phase5_artefacts"
+ARTEFACTS = ROOT / "reports" / "phase5a_artefacts"
 REPORT_PATH = ROOT / "reports" / "phase5_report.md"
 DEFAULT_LEAD = 24
 DEFAULT_N_SAMPLES = 1000

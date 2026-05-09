@@ -1,0 +1,4 @@
+variant,n_feats_eff,wall_s,brier,bss,delta_vs_baseline_22,delta_vs_synoptic_best
+v1 per-NWP only,47,5.8,0.1236,0.454,0.0029,0.0054
+v2 EA persistence,23,4.8,0.1245,0.45,0.0038,0.0063
+v3 full 3c (both),51,5.1,0.126,0.4434,0.0053,0.0078

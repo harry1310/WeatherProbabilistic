@@ -1,0 +1,38 @@
+Phase 6 — Bayesian logreg vs matched LightGBM (logreg-only re-run)
+==================================================================
+
+Station:      ea_bellever_dartmoor
+Lead hours:   24
+Subsample:    5,000 train rows (seed 42)
+Test set:     2,987 rows (2025-12-25 12:00:00 → 2026-04-28 23:00:00)
+Logreg cfg:   blackjax NUTS, tune=1000, draws=1000, chains=4
+
+Test Brier (lower = better)
+---------------------------
+Climatology (constant test_clim=0.239):                     0.2264
+LightGBM   (matched, 5,000-row train):                    0.1263   BSS +0.4421
+Bayesian-logreg (matched, 5,000-row train, blackjax):     0.1228   BSS +0.4578
+PyMC-BART (prior run, same 5,000-row train, context):    0.1209   BSS +0.4659
+3a deployed (v2026-04-28_232709, ~14k-row train, context only):                 0.1267   BSS +0.4402
+
+Bayesian logreg vs matched LightGBM (same training rows)
+  Δ Brier (logreg − LGB):  -0.0035  (-2.81%)
+  negative = logreg wins, positive = LightGBM wins (LGB captures non-linearity logreg misses)
+
+DIAGNOSTIC: Bayesian logreg vs prior BART (is BART's win from non-linearity, or just from being Bayesian?)
+  Δ Brier (logreg − BART): +0.0018  (+1.53%)
+  negative = logreg beats BART (Bayesian-ness alone explains BART's win — trees aren't pulling weight)
+  positive = BART beats logreg → trees ARE adding value beyond Bayesian uncertainty
+
+Reliability — Bayesian logreg test predictions (10 equal-width bins)
+--------------------------------------------------------------------
+  [0.00,0.10)  n=1107  p_mean=0.047  y_rate=0.033  diff=-0.014
+  [0.10,0.20)  n= 446  p_mean=0.140  y_rate=0.161  diff=+0.021
+  [0.20,0.30)  n= 187  p_mean=0.248  y_rate=0.246  diff=-0.002
+  [0.30,0.40)  n= 157  p_mean=0.345  y_rate=0.287  diff=-0.058
+  [0.40,0.50)  n= 117  p_mean=0.451  y_rate=0.479  diff=+0.027
+  [0.50,0.60)  n= 118  p_mean=0.554  y_rate=0.492  diff=-0.062
+  [0.60,0.70)  n= 166  p_mean=0.652  y_rate=0.608  diff=-0.044
+  [0.70,0.80)  n= 143  p_mean=0.750  y_rate=0.664  diff=-0.085
+  [0.80,0.90)  n= 184  p_mean=0.853  y_rate=0.734  diff=-0.120
+  [0.90,1.00)  n= 362  p_mean=0.955  y_rate=0.895  diff=-0.060
