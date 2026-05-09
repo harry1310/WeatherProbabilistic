@@ -63,7 +63,7 @@ from src.models.phase2_partial_pooling import (  # noqa: E402
     predict_partial_pooling_summary,
 )
 
-from run_phase6_bart_bakeoff import resolve_station  # noqa: E402
+from _shared import resolve_station  # noqa: E402
 
 LIVE_BUNDLE_DIR = ROOT / "reports" / "phase5a_artefacts" / "live_bundle"
 POSTERIOR_DIR = ROOT / "reports" / "phase5a_artefacts" / "posteriors"

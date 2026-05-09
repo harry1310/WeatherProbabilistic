@@ -1,0 +1,9 @@
+-r requirements.txt
+# Extra deps used only by the phase 6 bake-off scripts in scripts/run_phase6_*.
+# Production predict scripts (predict_4a, predict_5a) deliberately do NOT
+# import from those bake-off modules — they pull shared helpers from
+# scripts/_shared.py instead — so neither of these belongs in the main
+# requirements.txt and neither gets installed by predict-4a.yml /
+# predict-5a.yml CI.
+lightgbm>=4.0
+pymc-bart>=0.5

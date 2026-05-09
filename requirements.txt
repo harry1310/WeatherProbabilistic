@@ -13,11 +13,7 @@ numba>=0.60
 # DuckDB powers the schema-tolerant parquet reader used by predict_4a /
 # predict_5a / the bake-off scripts (hive_partitioning + union_by_name).
 duckdb>=1.0
-# predict_4a / predict_5a transitively import scripts/run_phase6_bart_bakeoff.py
-# (resolve_station / build_features_via_duckdb / FEATURE_NAMES / time_split),
-# whose top-level imports include both lightgbm (per-lead 3a/3c/3d champion
-# baselines) and pymc_bart (the original Python-side BART path retained for
-# bake-off comparison). Both are needed at import time even though predict_4a
-# uses dbarts via rpy2 instead.
-lightgbm>=4.0
-pymc-bart>=0.5
+# Bake-off-only deps (lightgbm, pymc-bart) live in requirements-bakeoff.txt
+# so production CI doesn't install them. predict_4a / predict_5a now import
+# their shared helpers from scripts/_shared.py rather than transitively
+# pulling in the bake-off module.

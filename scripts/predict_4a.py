@@ -69,14 +69,14 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from src.data import LOCATION, WEATHERBLEND_DATA_ROOT, WET_THRESHOLD_MM  # noqa: E402
 
-from run_phase6_bart_bakeoff import (  # noqa: E402
+from _shared import (  # noqa: E402
     FEATURE_NAMES,
     MODELS_LEAN,
+    add_synoptic_features,
     build_features_via_duckdb,
     resolve_station,
     time_split,
 )
-from run_phase6_dbarts_richfeats import add_synoptic_features  # noqa: E402
 
 _RCONVERT = default_converter + numpy2ri.converter + pandas2ri.converter
 ro.r(f'.libPaths(c("{_user_lib.replace(os.sep, "/")}", .libPaths()))')

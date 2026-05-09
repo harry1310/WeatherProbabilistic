@@ -53,60 +53,22 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from src.data import LOCATION, WEATHERBLEND_DATA_ROOT  # noqa: E402
 
-from run_phase6_bart_bakeoff import (  # noqa: E402
+from _shared import (  # noqa: E402
     FEATURE_NAMES,
     MODELS_LEAN,
     OUTPUT_ROOT,
-    brier,
+    add_synoptic_features,  # noqa: F401  re-exported for peer bake-off scripts
     build_features_via_duckdb,
-    reliability_table,
     resolve_station,
     time_split,
 )
+# brier + reliability_table still live in the bake-off script (they're
+# bake-off-specific reporting helpers, not part of the prod feature path).
+from run_phase6_bart_bakeoff import brier, reliability_table  # noqa: E402
 
 _RCONVERT = default_converter + numpy2ri.converter + pandas2ri.converter
 ro.r(f'.libPaths(c("{_user_lib.replace(os.sep, "/")}", .libPaths()))')
 dbarts = importr("dbarts")
-
-
-def add_synoptic_features(station_friendly: str, lead_hours: int,
-                           df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
-    """Pull NWP-mean wind direction (encoded as sin/cos unit vector to avoid
-    the 0°/360° circular-mean discontinuity) and NWP-mean surface pressure
-    via DuckDB, then merge onto df by ValidTimeUtc.
-    """
-    fc_glob = str((WEATHERBLEND_DATA_ROOT / "forecasts" / "**" / "*.parquet")).replace("\\", "/")
-    model_in_clause = "(" + ",".join(f"'{full}'" for full, _ in MODELS_LEAN) + ")"
-    sql = f"""
-    WITH latest AS (
-        SELECT
-            ValidTimeUtc, Model,
-            WindDirection10m, SurfacePressure,
-            ROW_NUMBER() OVER (
-                PARTITION BY ValidTimeUtc, Model
-                ORDER BY RunTimeUtc DESC
-            ) AS rn
-        FROM read_parquet('{fc_glob}', hive_partitioning = false, union_by_name = true)
-        WHERE LocationName = '{LOCATION}'
-          AND RunTimeSource = 'offset_day'
-          AND LeadHours = {lead_hours}
-          AND Model IN {model_in_clause}
-    )
-    SELECT
-        ValidTimeUtc,
-        AVG(SIN(RADIANS(WindDirection10m))) AS wind_dir_sin_mean,
-        AVG(COS(RADIANS(WindDirection10m))) AS wind_dir_cos_mean,
-        AVG(SurfacePressure)                AS surface_pressure_mean
-    FROM latest
-    WHERE rn = 1
-    GROUP BY ValidTimeUtc
-    ORDER BY ValidTimeUtc
-    """
-    con = duckdb.connect(":memory:")
-    syn = con.execute(sql).fetch_df()
-    con.close()
-    df = df.merge(syn, on="ValidTimeUtc", how="left")
-    return df, ["wind_dir_sin_mean", "wind_dir_cos_mean", "surface_pressure_mean"]
 
 
 def add_rolling_error_features(station_friendly: str, lead_hours: int,
