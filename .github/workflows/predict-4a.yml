@@ -63,9 +63,17 @@ jobs:
         # let dbarts compile from CRAN source in ~2 min on a standard
         # runner. R-level lib path under user home so we don't need sudo
         # on every install.
+        #
+        # libtirpc-dev: rpy2-rinterface's wheel build runs a setup.py link
+        # check that transitively pulls in libtirpc (R 4.4 on Ubuntu 24.04
+        # links against it for RPC support; libtirpc-dev is NOT installed
+        # by default on stock GH runners). RPY2_CFFI_MODE=ABI doesn't skip
+        # this build_requires-phase link, so the dev package needs to be
+        # present even in ABI mode.
+        # python3-dev: Python headers for rpy2's cffi build.
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends r-base r-base-dev
+          sudo apt-get install -y --no-install-recommends r-base r-base-dev libtirpc-dev python3-dev
           R --version
           mkdir -p ~/R/x86_64-pc-linux-gnu-library/4.4
           echo 'R_LIBS_USER=~/R/x86_64-pc-linux-gnu-library/4.4' >> ~/.Renviron
