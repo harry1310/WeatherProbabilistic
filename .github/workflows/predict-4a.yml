@@ -133,16 +133,25 @@ jobs:
           fi
           python -u scripts/predict_4a.py $ARGS
 
-      - name: Push Phase 4a predictions to R2
-        # Same data/predictions/precipitation/ prefix as 3a/3c/3d so
-        # WeatherBlend's render scanner picks 4a up automatically (4a
-        # is in ActivePhasePolicy.ByTarget["precipitation"]).
+      - name: Push Phase 4a predictions + metadata to R2
+        # Two prefixes:
+        # 1. data/predictions/precipitation/{station}/model_version=v..._phase4a/
+        #    — WeatherBlend's GetPrecipitationPredictions scanner.
+        # 2. data/models/precipitation/{station}/v..._phase4a/
+        #    — training_metadata.json + feature_schema.json so
+        #    LoadModelSummaries populates the Models card, Spec page emits
+        #    a row, verify joins to phase via phaseByVersion, and
+        #    rolling-Brier filter accepts the predictions.
         env:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
           rclone copy ../WeatherBlend/data/predictions/precipitation \
             "r2:${R2_BUCKET}/data/predictions/precipitation" \
             --include '**/model_version=*phase4a*/**' \
+            --fast-list --transfers 16 --checkers 32 --progress
+          rclone copy ../WeatherBlend/data/models/precipitation \
+            "r2:${R2_BUCKET}/data/models/precipitation" \
+            --include '**/*phase4a*/**' \
             --fast-list --transfers 16 --checkers 32 --progress
 
       - name: Upload logs as artifact

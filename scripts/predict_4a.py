@@ -29,6 +29,7 @@ WeatherBlend so the R2-rcloned forecast tree is reachable.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -188,41 +189,69 @@ def build_pooled_live_features(station_friendly: str, anchor: datetime) -> pd.Da
     return df
 
 
-def train_and_predict_one_station(station_friendly: str, anchor: datetime) -> pd.DataFrame:
-    """Single-session BART fit + predict for one station, pooled across
-    all leads. Returns a DataFrame with ValidTimeUtc + LeadHours + ProbWet
-    for upcoming valid times × leads."""
+def _brier(p: np.ndarray, y: np.ndarray) -> float:
+    return float(np.mean((p - y) ** 2))
+
+
+def train_and_predict_one_station(station_friendly: str, anchor: datetime) -> dict:
+    """Single-session BART fit, pooled across all leads. Stacks the held-
+    out test slice + live-future features as `x.test` so one fit yields
+    both: honest test Brier per lead (for training_metadata.PerLead) AND
+    live predictions (for predictions.parquet).
+
+    Returns a dict with:
+      live_preds  - DataFrame of live (ValidTimeUtc, LeadHours, ProbWet)
+      per_lead    - list of dicts, one per lead: TestRows, BlendTestMae, BSS, ...
+      train_df    - the training slice used (for date ranges)
+      val_df      - val slice (for date ranges)
+      test_df     - test slice (for date ranges)
+      feature_names_eff - the effective feature list after all-NaN drop
+    """
     syn_feats = ["wind_dir_sin_mean", "wind_dir_cos_mean", "surface_pressure_mean"]
     feats = list(FEATURE_NAMES) + syn_feats + ["lead"]
 
     print(f"  building pooled training features ({len(LEADS)} leads)...", flush=True)
-    df_train = build_pooled_training_features(station_friendly)
-    train_df, _val_df, _test_df = time_split(df_train)
+    df_pooled = build_pooled_training_features(station_friendly)
+    train_df, val_df, test_df = time_split(df_pooled)
+
     X_train_full = train_df[feats].to_numpy(dtype="float64")
-    y_train = train_df["wet"].to_numpy(dtype="int8")
+    y_train      = train_df["wet"].to_numpy(dtype="int8")
+    X_test_full  = test_df[feats].to_numpy(dtype="float64")
+    y_test       = test_df["wet"].to_numpy(dtype="int8")
 
     col_all_nan = np.isnan(X_train_full).all(axis=0)
     kept = np.where(~col_all_nan)[0]
     feature_names_eff = [feats[i] for i in kept]
     X_train = X_train_full[:, kept]
-    print(f"  pooled train: {len(y_train):,} rows | features eff: {len(feature_names_eff)}",
-          flush=True)
+    X_test  = X_test_full[:, kept]
+    print(f"  train: {len(y_train):,} | val: {len(val_df):,} | test: {len(y_test):,} | "
+          f"features eff: {len(feature_names_eff)}", flush=True)
 
     print(f"  building pooled live features (horizon {HORIZON_DAYS}d)...", flush=True)
     df_live = build_pooled_live_features(station_friendly, anchor)
-    if len(df_live) == 0:
-        print(f"  no live features past anchor — skipping station")
-        return pd.DataFrame()
-    X_live_full = df_live[feats].to_numpy(dtype="float64")
-    X_live = X_live_full[:, kept]
-    print(f"  pooled live: {len(df_live):,} rows", flush=True)
+    has_live = len(df_live) > 0
+    if has_live:
+        X_live_full = df_live[feats].to_numpy(dtype="float64")
+        X_live = X_live_full[:, kept]
+        print(f"  live: {len(df_live):,} rows", flush=True)
+    else:
+        X_live = np.zeros((0, X_train.shape[1]))
+        print(f"  no live feature rows past anchor — emitting metadata only", flush=True)
 
+    # Median-impute + standardise — fit on train only, apply to all slices.
     median = np.nanmedian(X_train, axis=0)
     X_train = np.where(np.isnan(X_train), median, X_train)
-    X_live  = np.where(np.isnan(X_live), median, X_live)
+    X_test  = np.where(np.isnan(X_test),  median, X_test)
+    X_live  = np.where(np.isnan(X_live),  median, X_live)
     scaler = StandardScaler().fit(X_train)
     X_train_s = scaler.transform(X_train).astype(np.float64)
+    X_test_s  = scaler.transform(X_test).astype(np.float64)
     X_live_s  = scaler.transform(X_live).astype(np.float64)
+
+    # Stack [test, live] as x.test so one fit covers both.
+    n_test = X_test_s.shape[0]
+    n_live = X_live_s.shape[0]
+    X_holdouts = np.vstack([X_test_s, X_live_s]) if n_live > 0 else X_test_s
 
     print(f"  fitting dbarts (ntree={NTREE}, k={K}, nskip={NSKIP}, ndpost={NDPOST})...",
           flush=True)
@@ -230,24 +259,159 @@ def train_and_predict_one_station(station_friendly: str, anchor: datetime) -> pd
     with localconverter(_RCONVERT):
         x_train_r = ro.conversion.py2rpy(X_train_s)
         y_train_r = ro.conversion.py2rpy(y_train.astype(np.float64))
-        x_live_r  = ro.conversion.py2rpy(X_live_s)
+        x_holdouts_r = ro.conversion.py2rpy(X_holdouts)
     fit = dbarts.bart(
-        x_train=x_train_r, y_train=y_train_r, x_test=x_live_r,
+        x_train=x_train_r, y_train=y_train_r, x_test=x_holdouts_r,
         ntree=NTREE, k=K, nskip=NSKIP, ndpost=NDPOST,
         keeptrees=True, verbose=False, seed=SEED,
     )
-    yhat_test_r = fit.rx2("yhat.test")
+    yhat_holdouts_r = fit.rx2("yhat.test")
     with localconverter(_RCONVERT):
-        yhat = np.array(ro.conversion.rpy2py(yhat_test_r))
-    p_wet = norm.cdf(yhat).mean(axis=0)
-    print(f"  fit+predict done in {(time.time() - t0) / 60:.1f} min", flush=True)
+        yhat = np.array(ro.conversion.rpy2py(yhat_holdouts_r))
+    p_holdouts = norm.cdf(yhat).mean(axis=0)
+    print(f"  fit done in {(time.time() - t0) / 60:.1f} min", flush=True)
 
-    out = pd.DataFrame({
-        "ValidTimeUtc": df_live["ValidTimeUtc"],
-        "LeadHours":    df_live["lead"].astype(int),
-        "ProbWet":      p_wet,
-    })
-    return out
+    p_test = p_holdouts[:n_test]
+    p_live = p_holdouts[n_test:] if n_live > 0 else np.zeros(0, dtype="float64")
+
+    # Per-lead test Brier (for the Models page card).
+    per_lead = []
+    test_lead = test_df["lead"].astype(int).to_numpy() if "lead" in test_df.columns else None
+    if test_lead is None:
+        # `lead` column is set by build_pooled_training_features; if missing
+        # (shouldn't happen) fall back to one bucket.
+        per_lead.append({"LeadHours": -1, "TestRows": int(n_test),
+                         "BlendTestMae": _brier(p_test, y_test)})
+    else:
+        train_clim = float(train_df["wet"].mean())  # pooled climatology
+        for L in LEADS:
+            mask = test_lead == L
+            n = int(mask.sum())
+            if n == 0:
+                per_lead.append({"LeadHours": L, "TestRows": 0,
+                                 "BlendTestMae": float("nan"), "BSS": float("nan")})
+                continue
+            p_l = p_test[mask]
+            y_l = y_test[mask]
+            b = _brier(p_l, y_l)
+            clim_b = _brier(np.full_like(y_l, train_clim, dtype="float64"), y_l)
+            bss = (clim_b - b) / clim_b if clim_b > 0 else float("nan")
+            best_single_idx = None  # not meaningful for BART (per-NWP cols all blended)
+            per_lead.append({
+                "LeadHours":   L,
+                "TestRows":    n,
+                "ValRows":     int((val_df["lead"] == L).sum()) if "lead" in val_df.columns else 0,
+                "TrainRows":   int((train_df["lead"] == L).sum()) if "lead" in train_df.columns else 0,
+                "BlendTestMae": b,
+                "BSS":          bss,
+                "ClimatologyBrier": clim_b,
+                "BestSingle":   "(BART blender — pooled across NWPs)",
+                "BestSingleTestMae": float("nan"),
+            })
+
+    live_preds = pd.DataFrame()
+    if has_live and n_live > 0:
+        live_preds = pd.DataFrame({
+            "ValidTimeUtc": df_live["ValidTimeUtc"],
+            "LeadHours":    df_live["lead"].astype(int),
+            "ProbWet":      p_live,
+        })
+
+    return {
+        "live_preds": live_preds,
+        "per_lead":   per_lead,
+        "train_df":   train_df,
+        "val_df":     val_df,
+        "test_df":    test_df,
+        "feature_names_eff": feature_names_eff,
+    }
+
+
+def write_metadata(out_models_dir: Path, station_slug: str, station_friendly: str,
+                   version: str, result: dict, anchor: datetime) -> None:
+    """Emit training_metadata.json + feature_schema.json under
+    data/models/precipitation/{station}/{version}/ so WeatherBlend's
+    LoadModelSummaries + spec page + verify pipeline pick 4a up.
+    """
+    syn_feats = ["wind_dir_sin_mean", "wind_dir_cos_mean", "surface_pressure_mean"]
+    base_feats = list(FEATURE_NAMES) + syn_feats + ["lead"]
+
+    train_df = result["train_df"]
+    val_df   = result["val_df"]
+    test_df  = result["test_df"]
+    per_lead = result["per_lead"]
+    feature_names_eff = result["feature_names_eff"]
+
+    metadata = {
+        "Version":     version,
+        "Target":      "precipitation",
+        "Phase":       PHASE,
+        "DataSource":  "open_meteo_previous_runs+ea_rainfall+dbarts_bart_lead_as_feature",
+        "TrainedAtUtc": datetime.now(timezone.utc).isoformat(),
+        "Hyperparameters": {
+            "library":   "dbarts (R) via rpy2",
+            "ntree":     NTREE,
+            "k":         K,
+            "nskip":     NSKIP,
+            "ndpost":    NDPOST,
+            "seed":      SEED,
+            "objective": "binary (probit-link BART)",
+            "leadAsFeature": True,
+        },
+        "DeviationsFromBrief": [
+            "BART (Bayesian Additive Regression Trees) via R dbarts package, "
+            "called from Python via rpy2. Single-session train-and-predict "
+            "(dbarts trees can't round-trip via saveRDS).",
+            "Lead pooled across all six leads via a `lead` feature column "
+            "(Phase 5 pattern); one BART per station instead of per (station, "
+            "lead).",
+            "22-feature 3a base + 3 synoptic flow features (wind_dir_sin_mean, "
+            "wind_dir_cos_mean, surface_pressure_mean).",
+            "Predict horizon limited to 7 days from anchor (Open-Meteo "
+            "previous_runs forecast extent).",
+        ],
+        "PerLead": {str(d["LeadHours"]): {
+            **d,
+            "DataRangeTrain": (
+                f"{train_df['ValidTimeUtc'].min()} → {train_df['ValidTimeUtc'].max()}"
+                if len(train_df) else ""),
+            "DataRangeVal":   (
+                f"{val_df['ValidTimeUtc'].min()} → {val_df['ValidTimeUtc'].max()}"
+                if len(val_df) else ""),
+            "DataRangeTest":  (
+                f"{test_df['ValidTimeUtc'].min()} → {test_df['ValidTimeUtc'].max()}"
+                if len(test_df) else ""),
+            "TestCalendarMonths": 4,
+        } for d in per_lead if d["LeadHours"] > 0},
+    }
+
+    # feature_schema.json — replicate per-lead even though BART pools (so the
+    # Spec page picks up one row per (composite, phase, lead) per its
+    # existing iteration model). All leads share the same FeatureNames since
+    # they all use the lead-as-feature pooled BART.
+    nwp_models = [m for m, _ in MODELS_LEAN]
+    schema_per_lead = {
+        str(L): {
+            "Target": "precipitation",
+            "FeatureSet": f"phase4a-bart-l{L:02}",
+            "LeadHours":  L,
+            "RequiredModels": [],
+            "OptionalModels": nwp_models,
+            "Models":         nwp_models,
+            "FeatureNames":   feature_names_eff,
+            "DataSource":     "open_meteo_previous_runs",
+            "Tier":           "4a-bart",
+            "UkvStrategy":    None,
+        } for L in LEADS
+    }
+    schema = {"Leads": schema_per_lead}
+
+    out_models_dir.mkdir(parents=True, exist_ok=True)
+    (out_models_dir / "training_metadata.json").write_text(
+        json.dumps(metadata, indent=2, default=str))
+    (out_models_dir / "feature_schema.json").write_text(
+        json.dumps(schema, indent=2))
+    print(f"  metadata → {out_models_dir}")
 
 
 def main() -> None:
@@ -257,8 +421,10 @@ def main() -> None:
                         "valid times after this, up to anchor+7d.")
     p.add_argument("--stations", nargs="*", default=None,
                    help="Station subset (default: all 3 active).")
-    p.add_argument("--out-root", default=str(WEATHERBLEND_DATA_ROOT / "predictions"),
+    p.add_argument("--predictions-root", default=str(WEATHERBLEND_DATA_ROOT / "predictions"),
                    help="Predictions tree root.")
+    p.add_argument("--models-root", default=str(WEATHERBLEND_DATA_ROOT / "models"),
+                   help="Models tree root for metadata files.")
     args = p.parse_args()
 
     if args.anchor:
@@ -268,7 +434,8 @@ def main() -> None:
     anchor = anchor.replace(tzinfo=None)
 
     stations = args.stations or STATIONS
-    out_root = Path(args.out_root)
+    predictions_root = Path(args.predictions_root)
+    models_root = Path(args.models_root)
 
     version = datetime.now(timezone.utc).strftime("v%Y-%m-%d_%H%M%S_phase4a")
     print(f"[{time.strftime('%H:%M:%S')}] Phase 4a lead-as-feature train-and-predict")
@@ -279,33 +446,42 @@ def main() -> None:
     print(f"  horizon: {HORIZON_DAYS} days")
 
     rows_written = 0
+    versions_emitted = 0
     for station_input in stations:
         station_slug, station_friendly = resolve_station(station_input)
         print(f"\n[{time.strftime('%H:%M:%S')}] {station_friendly}")
         try:
-            preds = train_and_predict_one_station(station_friendly, anchor)
+            result = train_and_predict_one_station(station_friendly, anchor)
         except Exception as e:
             print(f"  FAILED — {e}")
             raise
-        if len(preds) == 0:
-            print(f"  no predictions emitted for {station_slug}")
+
+        # Emit metadata regardless of live coverage (test-set Brier is the
+        # main driver for the Models card).
+        models_dir = models_root / "precipitation" / station_slug / version
+        write_metadata(models_dir, station_slug, station_friendly, version, result, anchor)
+        versions_emitted += 1
+
+        live_preds = result["live_preds"]
+        if len(live_preds) == 0:
+            print(f"  no live predictions emitted for {station_slug}")
             continue
-        preds["ModelVersion"] = version
-        preds["TruthStation"] = station_slug
-        preds["PredictionMadeAtUtc"] = datetime.now(timezone.utc).replace(tzinfo=None)
+        live_preds["ModelVersion"] = version
+        live_preds["TruthStation"] = station_slug
+        live_preds["PredictionMadeAtUtc"] = datetime.now(timezone.utc).replace(tzinfo=None)
         date_str = anchor.strftime("%Y-%m-%d")
-        out_dir = (out_root / "precipitation" / station_slug
+        out_dir = (predictions_root / "precipitation" / station_slug
                    / f"model_version={version}" / f"date={date_str}")
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / "predictions.parquet"
-        preds.to_parquet(out_path, index=False)
-        print(f"  → {out_path}  ({len(preds):,} rows, P(wet) mean {preds['ProbWet'].mean():.3f})")
-        rows_written += len(preds)
+        live_preds.to_parquet(out_path, index=False)
+        print(f"  → {out_path}  ({len(live_preds):,} rows, P(wet) mean {live_preds['ProbWet'].mean():.3f})")
+        rows_written += len(live_preds)
 
     print()
-    print(f"Phase 4a predict complete. Total rows: {rows_written:,}")
-    if rows_written == 0:
-        print("WARN: no predictions written.")
+    print(f"Phase 4a complete. Versions: {versions_emitted}, prediction rows: {rows_written:,}")
+    if versions_emitted == 0:
+        print("ERROR: no versions emitted — check forecast tree presence.")
         sys.exit(1)
 
 
