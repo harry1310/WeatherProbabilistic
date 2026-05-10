@@ -39,7 +39,7 @@ on:
   workflow_dispatch:
     inputs:
       phases:
-        description: "Comma-separated phases to retrain. 'all' = 4a,5a. Examples: '5a', '4a', '4a,5a'."
+        description: "Comma-separated phases to retrain. 'all' = every impl=python phase in WeatherBlend's config/phases.yaml (fetched from R2). Examples: '5a', '4a', '4a,5a'."
         required: false
         default: "all"
         type: string
@@ -109,35 +109,112 @@ jobs:
             echo "proceed=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # ---- rclone setup (moved up so the phase-decide step can fetch
+      # phases.yaml from R2 before deciding which phases to run) -----------
+
+      - name: Install rclone
+        if: steps.gate.outputs.proceed == 'true'
+        run: |
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+          rclone version
+
+      - name: Configure rclone for R2
+        if: steps.gate.outputs.proceed == 'true'
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+        run: |
+          mkdir -p ~/.config/rclone
+          cat > ~/.config/rclone/rclone.conf <<EOF
+          [r2]
+          type = s3
+          provider = Cloudflare
+          access_key_id = ${R2_ACCESS_KEY_ID}
+          secret_access_key = ${R2_SECRET_ACCESS_KEY}
+          endpoint = ${R2_ENDPOINT}
+          acl = private
+          EOF
+
+      - name: Fetch phases.yaml from R2
+        # WeatherBlend's previous-runs-refresh workflow pushes
+        # src/WeatherBlend/config/phases.yaml to r2:${R2_BUCKET}/config/
+        # on every refresh tick, so this is always recent. Cross-repo
+        # canonical config without checking out WeatherBlend.
+        if: steps.gate.outputs.proceed == 'true'
+        env:
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          mkdir -p ./config
+          rclone copy "r2:${R2_BUCKET}/config/phases.yaml" ./config/ --checkers 4
+          echo "----- phases.yaml -----"
+          cat ./config/phases.yaml
+
       - name: Decide which phases to run
+        # Source-of-truth resolution:
+        #   - "all" → all impl=python phases listed in phases.yaml.
+        #     Adding a new python phase to phases.yaml automatically
+        #     wires it into the Sunday default sweep WITHOUT editing this
+        #     file's "all" expansion (the historical "INPUT='4a,5a'"
+        #     bug-prone hardcoding).
+        #   - explicit comma-separated list → exact subset to run.
+        #
         # Phase config can come from either trigger:
         #   - workflow_dispatch: inputs.phases (default "all")
         #   - repository_dispatch: client_payload.phases (default "all")
-        # Same parsing for both.
+        #
+        # NOTE: each phase still needs its own concrete "Train <id>" run
+        # block below — the YAML drives the "all" expansion and the
+        # validation set, but a new phase still needs the per-phase
+        # train invocation. Adding 5b: (1) edit phases.yaml in WB,
+        # (2) add a `run_5b` output emit + a `Train 5b` step here.
         id: phases
         if: steps.gate.outputs.proceed == 'true'
         env:
           PHASES_DISPATCH: ${{ inputs.phases }}
           PHASES_PAYLOAD: ${{ github.event.client_payload.phases }}
         run: |
+          # yq is pre-installed on ubuntu-latest (mikefarah/yq).
+          PYTHON_PHASES=$(yq -r '
+            [.targets | to_entries[].value.phases[] | select(.impl == "python") | .id] | join(",")
+          ' ./config/phases.yaml)
+          echo "impl=python phases from phases.yaml: $PYTHON_PHASES"
+
           if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
             INPUT="${PHASES_PAYLOAD:-all}"
           else
             INPUT="${PHASES_DISPATCH:-all}"
           fi
-          if [ "$INPUT" = "all" ]; then INPUT="4a,5a"; fi
+          if [ "$INPUT" = "all" ]; then INPUT="$PYTHON_PHASES"; fi
+          echo "Resolved phase list: $INPUT"
+
+          # Per-phase run flags. Each known python phase emits a flag here;
+          # unknown phases (in input but absent from phases.yaml) error
+          # out. Add a new flag here when wiring a new phase's run block.
           run_4a=false; run_5a=false
-          case ",$INPUT," in
-            *,4a,*) run_4a=true ;;
-          esac
-          case ",$INPUT," in
-            *,5a,*) run_5a=true ;;
-          esac
-          echo "Selected phases: $INPUT (run_4a=$run_4a, run_5a=$run_5a)"
+          case ",$INPUT," in *,4a,*) run_4a=true ;; esac
+          case ",$INPUT," in *,5a,*) run_5a=true ;; esac
           echo "run_4a=$run_4a" >> "$GITHUB_OUTPUT"
           echo "run_5a=$run_5a" >> "$GITHUB_OUTPUT"
+
+          # Validate input against phases.yaml — anything in INPUT that
+          # isn't in PYTHON_PHASES is an unknown phase. Catches typos
+          # ("5b" before adding 5b to the YAML) and hardcoded "5z" tests.
+          IFS=',' read -ra REQUESTED <<< "$INPUT"
+          IFS=',' read -ra KNOWN <<< "$PYTHON_PHASES"
+          for p in "${REQUESTED[@]}"; do
+            found=false
+            for k in "${KNOWN[@]}"; do
+              if [ "$p" = "$k" ]; then found=true; break; fi
+            done
+            if [ "$found" = "false" ]; then
+              echo "::error::Phase '$p' is not in phases.yaml's impl=python list (have: $PYTHON_PHASES). Add it to phases.yaml first."
+              exit 1
+            fi
+          done
+
           if [ "$run_4a" = "false" ] && [ "$run_5a" = "false" ]; then
-            echo "::error::No recognised phases in input '$INPUT'. Expected 4a, 5a, or 'all'."
+            echo "::error::No phase run-blocks were enabled by input '$INPUT'. If you've added a new phase to phases.yaml, you also need to wire its run_<id>=true emit + Train step in retrain-python.yml."
             exit 1
           fi
 
@@ -205,30 +282,6 @@ jobs:
           print(f'JAX devices: {ds}')
           assert len(ds) == 4, f'Expected 4 CpuDevices for chain pmap parallelism, got {len(ds)}. XLA_FLAGS at job level should make JAX virtualise 4 devices on the 4-vCPU runner.'
           "
-
-      - name: Install rclone
-        if: steps.gate.outputs.proceed == 'true'
-        run: |
-          curl -fsSL https://rclone.org/install.sh | sudo bash
-          rclone version
-
-      - name: Configure rclone for R2
-        if: steps.gate.outputs.proceed == 'true'
-        env:
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
-        run: |
-          mkdir -p ~/.config/rclone
-          cat > ~/.config/rclone/rclone.conf <<EOF
-          [r2]
-          type = s3
-          provider = Cloudflare
-          access_key_id = ${R2_ACCESS_KEY_ID}
-          secret_access_key = ${R2_SECRET_ACCESS_KEY}
-          endpoint = ${R2_ENDPOINT}
-          acl = private
-          EOF
 
       - name: Pull data trees from R2
         # Both 4a and 5a need the forecast tree + EA truth. Pull once,
