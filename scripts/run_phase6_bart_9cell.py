@@ -104,6 +104,12 @@ def prepare_full(df: pd.DataFrame, feature_list: list[str]):
 
 def main() -> None:
     rows = []
+    # Per-row test predictions across all 9 cells, written as a single
+    # parquet at the end. Schema matches train_4a's test_predictions.parquet
+    # (valid_time, station, lead, p_wet, observed_wet) so the linear-pool
+    # bake-off can inner-join 3a vs per-cell BART without per-phase schema
+    # branches.
+    pred_frames: list[pd.DataFrame] = []
     for station_slug in STATIONS:
         station_slug, station_friendly = resolve_station(station_slug)
         for lead in LEADS:
@@ -143,10 +149,23 @@ def main() -> None:
                 "delta_brier": round(delta_3a, 4) if not np.isnan(delta_3a) else None,
                 "delta_pct": round(pct_3a, 2) if not np.isnan(pct_3a) else None,
             })
+            # Per-row test predictions for the per-cell-vs-3a blend bake-off.
+            pred_frames.append(pd.DataFrame({
+                "valid_time":   pd.to_datetime(_test_df["ValidTimeUtc"].values),
+                "station":      station_slug,
+                "lead":         lead,
+                "p_wet":        p_test,
+                "observed_wet": y_test.astype("int8"),
+            }))
 
     summary = pd.DataFrame(rows)
     out_dir = OUTPUT_ROOT / "_9cell_full"
     out_dir.mkdir(parents=True, exist_ok=True)
+    if pred_frames:
+        all_preds = pd.concat(pred_frames, ignore_index=True)
+        pred_path = out_dir / "test_predictions.parquet"
+        all_preds.to_parquet(pred_path, index=False)
+        print(f"  wrote {len(all_preds):,} per-row test predictions → {pred_path}")
     print()
     print(f"9-cell summary at champion config (ntree={NTREE}, k={K}):")
     print(summary.to_string(index=False))

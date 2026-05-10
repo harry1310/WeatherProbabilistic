@@ -210,11 +210,13 @@ jobs:
           # Per-phase run flags. Each known python phase emits a flag here;
           # unknown phases (in input but absent from phases.yaml) error
           # out. Add a new flag here when wiring a new phase's run block.
-          run_4a=false; run_5a=false
-          case ",$INPUT," in *,4a,*) run_4a=true ;; esac
-          case ",$INPUT," in *,5a,*) run_5a=true ;; esac
-          echo "run_4a=$run_4a" >> "$GITHUB_OUTPUT"
-          echo "run_5a=$run_5a" >> "$GITHUB_OUTPUT"
+          run_4a=false; run_4a_percell=false; run_5a=false
+          case ",$INPUT," in *,4a,*)         run_4a=true ;;         esac
+          case ",$INPUT," in *,4a_percell,*) run_4a_percell=true ;; esac
+          case ",$INPUT," in *,5a,*)         run_5a=true ;;         esac
+          echo "run_4a=$run_4a"                 >> "$GITHUB_OUTPUT"
+          echo "run_4a_percell=$run_4a_percell" >> "$GITHUB_OUTPUT"
+          echo "run_5a=$run_5a"                 >> "$GITHUB_OUTPUT"
 
           # Validate input against phases.yaml — anything in INPUT that
           # isn't in PYTHON_PHASES is an unknown phase. Catches typos
@@ -232,7 +234,7 @@ jobs:
             fi
           done
 
-          if [ "$run_4a" = "false" ] && [ "$run_5a" = "false" ]; then
+          if [ "$run_4a" = "false" ] && [ "$run_4a_percell" = "false" ] && [ "$run_5a" = "false" ]; then
             echo "::error::No phase run-blocks were enabled by input '$INPUT'. If you've added a new phase to phases.yaml, you also need to wire its run_<id>=true emit + Train step in retrain-python.yml."
             exit 1
           fi
@@ -261,12 +263,12 @@ jobs:
         with:
           python-version: "3.12"
 
-      # R + dbarts only needed for 4a — install conditionally so 5a-only
-      # runs save the ~3 min apt + R-package install. 4a's existing
-      # train-4a.yml has the same install; copying verbatim keeps the
-      # two workflows in sync until we factor a shared composite action.
-      - name: Install R + dbarts (4a only)
-        if: steps.gate.outputs.proceed == 'true' && steps.phases.outputs.run_4a == 'true'
+      # R + dbarts needed for 4a (lead-pooled) AND 4a_percell (per-cell).
+      # Install conditionally so 5a-only runs save the ~3 min apt +
+      # R-package install. Both phase tags share the same R toolchain
+      # (dbarts) — one install line, two consumers.
+      - name: Install R + dbarts (4a / 4a_percell)
+        if: steps.gate.outputs.proceed == 'true' && (steps.phases.outputs.run_4a == 'true' || steps.phases.outputs.run_4a_percell == 'true')
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends r-base r-base-dev libtirpc-dev python3-dev
@@ -283,7 +285,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          if [ "${{ steps.phases.outputs.run_4a }}" = "true" ]; then
+          if [ "${{ steps.phases.outputs.run_4a }}" = "true" ] || [ "${{ steps.phases.outputs.run_4a_percell }}" = "true" ]; then
             # rpy2<3.6 because rpy2 3.6+ references R_getVar (R 4.5+)
             # which Ubuntu 24.04's r-base 4.4 doesn't expose.
             pip install 'rpy2<3.6'
@@ -320,7 +322,7 @@ jobs:
             ../WeatherBlend/data/truth/rainfall \
             --fast-list --transfers 16 --checkers 32
 
-      - name: Train 4a (BART)
+      - name: Train 4a (BART, lead-pooled)
         if: steps.gate.outputs.proceed == 'true' && steps.phases.outputs.run_4a == 'true'
         env:
           WEATHERBLEND_DATA_ROOT: ${{ github.workspace }}/../WeatherBlend/data
@@ -332,6 +334,23 @@ jobs:
           ARGS=""
           if [ -n "$ANCHOR" ]; then ARGS="--anchor $ANCHOR"; fi
           python -u scripts/train_4a.py $ARGS
+
+      - name: Train 4a_percell (BART, per-cell)
+        # Per-cell BART: 3 stations × 5 leads = 15 BART fits per run.
+        # Each fit is ~5-8 min on a 4-vCPU runner (less data per fit
+        # than lead-pooled 4a — ~14k rows vs ~70k pooled). Total wall:
+        # ~75-120 min, comparable to lead-pooled 4a (~25 min × 3 stations).
+        if: steps.gate.outputs.proceed == 'true' && steps.phases.outputs.run_4a_percell == 'true'
+        env:
+          WEATHERBLEND_DATA_ROOT: ${{ github.workspace }}/../WeatherBlend/data
+          R_HOME: /usr/lib/R
+          R_LIBS_USER: /home/runner/R/x86_64-pc-linux-gnu-library/4.4
+          RPY2_CFFI_MODE: ABI
+        run: |
+          ANCHOR="${{ inputs.anchor }}"
+          ARGS=""
+          if [ -n "$ANCHOR" ]; then ARGS="--anchor $ANCHOR"; fi
+          python -u scripts/train_4a_per_cell.py $ARGS
 
       - name: Train 5a (Bayesian logreg)
         if: steps.gate.outputs.proceed == 'true' && steps.phases.outputs.run_5a == 'true'
@@ -381,8 +400,12 @@ jobs:
       # tree is the live bundle predict_5a.py reads from on each
       # prediction tick.
 
-      - name: Push 4a bundles to R2
-        if: success() && steps.phases.outputs.run_4a == 'true'
+      - name: Push 4a / 4a_percell bundles to R2
+        # The include pattern `**/*phase4a*/**` matches BOTH lead-pooled
+        # (`v..._phase4a`) and per-cell (`v..._phase4a_percell`) bundle
+        # dirs, so one push step covers both phases. Gate fires on
+        # either run_4a or run_4a_percell being true.
+        if: success() && (steps.phases.outputs.run_4a == 'true' || steps.phases.outputs.run_4a_percell == 'true')
         env:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
@@ -409,8 +432,10 @@ jobs:
       # so a guard-fail / push-fail run still leaves the trained bundle
       # downloadable from the workflow page for manual triage.
 
-      - name: Upload 4a artefacts (fallback)
-        if: always() && steps.phases.outputs.run_4a == 'true'
+      - name: Upload 4a / 4a_percell artefacts (fallback)
+        # Same wildcard logic as the R2 push — `*phase4a*` matches both
+        # lead-pooled and per-cell bundle dirs.
+        if: always() && (steps.phases.outputs.run_4a == 'true' || steps.phases.outputs.run_4a_percell == 'true')
         uses: actions/upload-artifact@v4
         with:
           name: retrain-4a-${{ github.run_id }}

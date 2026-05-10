@@ -113,7 +113,7 @@ jobs:
             --include '**/*phase4a*/**' \
             --fast-list --transfers 16 --checkers 32
 
-      - name: Run Phase 4a state-load + predict
+      - name: Run Phase 4a state-load + predict (lead-pooled)
         # ~30s warm scaffold + predict per station. Total wall under 2 min
         # for 3 stations — 95% reduction vs the old daily train+predict.
         env:
@@ -131,6 +131,32 @@ jobs:
             ARGS="$ARGS --stations $STATIONS_LIST"
           fi
           python -u scripts/predict_4a.py $ARGS
+
+      - name: Run Phase 4a per-cell state-load + predict
+        # Same cron tick predicts BOTH 4a flavours. Per-cell loads N
+        # states per station (one per lead) — ~1s warm + predict per
+        # state, ~1-2 min per station, ~5 min for 3 stations. Predicts
+        # to a different model_version partition (`*_phase4a_percell`)
+        # so both flavours coexist in the predictions tree.
+        # continue-on-error: per-cell bundles may not exist yet on the
+        # first cycles after deployment; missing bundles shouldn't
+        # block the lead-pooled R2 push.
+        continue-on-error: true
+        env:
+          WEATHERBLEND_DATA_ROOT: ${{ github.workspace }}/../WeatherBlend/data
+          R_HOME: /usr/lib/R
+          R_LIBS_USER: /home/runner/R/x86_64-pc-linux-gnu-library/4.4
+          RPY2_CFFI_MODE: ABI
+        run: |
+          ANCHOR="${{ github.event.inputs.anchor }}"
+          STATIONS="${{ github.event.inputs.stations }}"
+          ARGS=""
+          if [ -n "$ANCHOR" ]; then ARGS="$ARGS --anchor $ANCHOR"; fi
+          if [ -n "$STATIONS" ]; then
+            STATIONS_LIST=$(echo "$STATIONS" | tr ',' ' ')
+            ARGS="$ARGS --stations $STATIONS_LIST"
+          fi
+          python -u scripts/predict_4a_per_cell.py $ARGS
 
       - name: Push Phase 4a predictions to R2
         # Predictions only — bundle dirs are train-4a.yml's territory.
