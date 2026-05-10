@@ -79,8 +79,15 @@ STATIONS = ["ea_bellever_dartmoor", "ea_bovey_tracey", "ea_dartmoor_nr_hexworthy
 LEADS = [12, 24, 48, 72, 96, 120]
 HORIZON_DAYS = 7
 
-# Warm-scaffold knobs — tiny by design. Real trees come from setState.
-WARM_NTREE = 50
+# Warm-scaffold knobs. NSKIP + NDPOST stay tiny — they're sampling
+# parameters and setState replaces both with the saved draws. NTREE,
+# however, is STRUCTURAL: setState only fills slots that the scaffold
+# already has, so a scaffold with fewer trees silently truncates the
+# saved state and predictions collapse toward climatology (verified
+# 2026-05-10 — synthetic 500-save / 50-load reproduces the production
+# regression to mean ≈ base rate, std ≈ 0.08 vs original std 0.40).
+# Read NTREE from preprocess.json so the scaffold always matches the
+# state's tree count without a constant to drift.
 WARM_NSKIP = 1
 WARM_NDPOST = 1
 
@@ -229,7 +236,8 @@ def predict_one_station(bundle_dir: Path, station_friendly: str,
     X_live_s = ((X_live - scaler_mean) / scaler_scale).astype(np.float64)
     print(f"  live: {len(df_live):,} rows", flush=True)
 
-    print(f"  building warm scaffold (ntree={WARM_NTREE}, nskip={WARM_NSKIP}, "
+    warm_ntree = int(preprocess["ntree"])
+    print(f"  building warm scaffold (ntree={warm_ntree}, nskip={WARM_NSKIP}, "
           f"ndpost={WARM_NDPOST})...", flush=True)
     t0 = time.time()
     with localconverter(_RCONVERT):
@@ -237,7 +245,7 @@ def predict_one_station(bundle_dir: Path, station_friendly: str,
         y_train_r = ro.conversion.py2rpy(y_train)
     warm = dbarts.bart(
         x_train=x_train_r, y_train=y_train_r,
-        ntree=WARM_NTREE, nskip=WARM_NSKIP, ndpost=WARM_NDPOST,
+        ntree=warm_ntree, nskip=WARM_NSKIP, ndpost=WARM_NDPOST,
         keeptrees=True, verbose=False, seed=preprocess.get("seed", 42),
     )
     ro.globalenv["warm"] = warm
