@@ -98,7 +98,15 @@ SEED = 42
 PHASE = "4a"
 
 STATIONS = ["ea_bellever_dartmoor", "ea_bovey_tracey", "ea_dartmoor_nr_hexworthy"]
-LEADS = [12, 24, 48, 72, 96, 120]
+# Lead 12 dropped 2026-05-10 — Open-Meteo's offset_day (previous_runs)
+# archive doesn't return lead 12 forecasts that go far enough back to
+# survive the train/val/test split, so per-lead test stats came back with
+# TestRows=0 for lead 12 in the v2026-05-09 bundle. The pooled fit still
+# included lead 12 nominally but had effectively no learning signal there,
+# making predict-time output pure extrapolation along the `lead` axis.
+# Keeping {24, 48, 72, 96, 120} where every bucket has ~14k train rows
+# and a real BSS vs climatology.
+LEADS = [24, 48, 72, 96, 120]
 
 
 def build_pooled_training_features(station_friendly: str) -> pd.DataFrame:

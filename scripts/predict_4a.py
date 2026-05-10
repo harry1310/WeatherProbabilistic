@@ -76,7 +76,10 @@ dbarts = importr("dbarts")
 
 PHASE = "4a"
 STATIONS = ["ea_bellever_dartmoor", "ea_bovey_tracey", "ea_dartmoor_nr_hexworthy"]
-LEADS = [12, 24, 48, 72, 96, 120]
+# Mirror of train_4a.py LEADS — 12 dropped 2026-05-10 (no offset_day
+# archive coverage at lead 12 → TestRows=0 in training metadata; query
+# was pure extrapolation). Keep both lists in lockstep.
+LEADS = [24, 48, 72, 96, 120]
 HORIZON_DAYS = 7
 
 # Warm-scaffold knobs. NSKIP + NDPOST stay tiny — they're sampling
