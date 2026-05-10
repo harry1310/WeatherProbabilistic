@@ -335,14 +335,45 @@ jobs:
           python -u scripts/run_phase5_bayesian.py $ARGS
           python -u scripts/extend_5a.py $ARGS
 
-      # ----- Slice 1: artefacts uploaded for inspection only --------------
-      # Slice 2 will replace these with R2 push (4a) + commit-back to main
-      # (5a, since predict-5a.yml reads its posterior from the checked-out
-      # repo). Keeping it as workflow artifacts for slice 1 means the user
-      # can vet the overnight test output before automating the side
-      # effects.
+      # ----- R2 auto-push (2026-05-10) ----------------------------------
+      # Slice 1's "upload as workflow artifact only" was always meant to
+      # be temporary; user authorised auto-push for both phases after
+      # validating the spread-features pilot earlier today. R2 sync is
+      # incremental, gated on the train step's success (the guard
+      # exited 4 if data drifted, in which case write_bundle never ran
+      # and there's nothing to sync). 5a's reports/phase5a_artefacts/
+      # tree is the live bundle predict_5a.py reads from on each
+      # prediction tick.
 
-      - name: Upload 4a artefacts (for inspection)
+      - name: Push 4a bundles to R2
+        if: success() && steps.phases.outputs.run_4a == 'true'
+        env:
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          rclone copy ../WeatherBlend/data/models/precipitation \
+            "r2:${R2_BUCKET}/data/models/precipitation" \
+            --fast-list --transfers 16 --checkers 32 --s3-no-check-bucket \
+            --include "**/*phase4a*/**"
+
+      - name: Push 5a bundle to R2
+        if: success() && steps.phases.outputs.run_5a == 'true'
+        env:
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          # Whole reports/phase5a_artefacts/ tree: posteriors NetCDF,
+          # live_bundle (StandardScaler + metadata), test predictions.
+          # predict_5a.py reads from the same paths on R2; auto-push
+          # rotates the production posterior atomically per file.
+          rclone copy ./reports/phase5a_artefacts \
+            "r2:${R2_BUCKET}/reports/phase5a_artefacts" \
+            --fast-list --transfers 16 --checkers 32 --s3-no-check-bucket
+
+      # ----- Workflow artefacts kept as a fallback ----------------------
+      # Auto-push above is the production path, but artefact upload stays
+      # so a guard-fail / push-fail run still leaves the trained bundle
+      # downloadable from the workflow page for manual triage.
+
+      - name: Upload 4a artefacts (fallback)
         if: always() && steps.phases.outputs.run_4a == 'true'
         uses: actions/upload-artifact@v4
         with:
@@ -351,7 +382,7 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
-      - name: Upload 5a artefacts (for inspection)
+      - name: Upload 5a artefacts (fallback)
         if: always() && steps.phases.outputs.run_5a == 'true'
         uses: actions/upload-artifact@v4
         with:

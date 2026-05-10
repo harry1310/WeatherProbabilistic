@@ -19,6 +19,10 @@ numba>=0.60
 # verified locally — bump in lockstep with pymc upgrades.
 jax>=0.10
 blackjax>=1.5
+# blackjax's progressbar imports fastprogress lazily — it's not a hard
+# dep, but pm.sample(progressbar=True) crashes at runtime without it.
+# Local boxes carry it transitively from old nutpie installs; CI doesn't.
+fastprogress>=1.0
 # DuckDB powers the schema-tolerant parquet reader used by predict_4a /
 # predict_5a / the bake-off scripts (hive_partitioning + union_by_name).
 duckdb>=1.0
