@@ -57,6 +57,21 @@ on:
         required: false
         default: false
         type: boolean
+      sampler_draws:
+        description: "5a only — per-chain post-warmup draws. Blank = script default (2000). Smoke-tests use 200."
+        required: false
+        default: ""
+        type: string
+      sampler_tune:
+        description: "5a only — per-chain warmup draws. Blank = script default (2000). Smoke-tests use 200."
+        required: false
+        default: ""
+        type: string
+      sampler_chains:
+        description: "5a only — number of MCMC chains. Blank = script default (4). 1 to isolate per-chain wall, 4 to test pmap parallelism."
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   # Distinct from weatherprobabilistic-train-4a (the existing 4a-only
@@ -327,13 +342,30 @@ jobs:
             ARGS="--add-spread-features"
             echo "::notice::Running 5a in 10-feature spread-features mode."
           fi
+          # Sampler-size overrides for CI smoke-tests. Blank input → use
+          # script defaults (2000 / 2000 / 4 = ~3h production run). Small
+          # values (e.g. 200 / 200 / 1) finish in minutes — useful for
+          # diagnosing whether chain_method="parallel" actually pmap's
+          # across multiple CPU devices in CI.
+          DRAWS="${{ inputs.sampler_draws }}"
+          TUNE="${{ inputs.sampler_tune }}"
+          CHAINS="${{ inputs.sampler_chains }}"
+          if [ -n "$DRAWS"  ]; then ARGS="$ARGS --draws $DRAWS";   echo "::notice::Sampler override: draws=$DRAWS";   fi
+          if [ -n "$TUNE"   ]; then ARGS="$ARGS --tune $TUNE";     echo "::notice::Sampler override: tune=$TUNE";     fi
+          if [ -n "$CHAINS" ]; then ARGS="$ARGS --chains $CHAINS"; echo "::notice::Sampler override: chains=$CHAINS"; fi
           # extend_5a builds the live_bundle StandardScaler from the
           # SAME prepare_phase3_dataset call shape as the trainer — pass
-          # the same flag so the scaler matches the posterior's feature
-          # set. Mismatched flags here = predict_5a feeds wrong-shaped
-          # X to the posterior and silently mis-scores every row.
+          # the spread-features flag so the scaler matches the posterior's
+          # feature set. Mismatched flags here = predict_5a feeds
+          # wrong-shaped X to the posterior and silently mis-scores every
+          # row. Sampler-size overrides apply ONLY to the posterior fit;
+          # extend_5a doesn't sample, it just loads + predicts.
           python -u scripts/run_phase5_bayesian.py $ARGS
-          python -u scripts/extend_5a.py $ARGS
+          EXTEND_ARGS=""
+          if [ "${{ steps.spread.outputs.flag }}" = "true" ]; then
+            EXTEND_ARGS="--add-spread-features"
+          fi
+          python -u scripts/extend_5a.py $EXTEND_ARGS
 
       # ----- R2 auto-push (2026-05-10) ----------------------------------
       # Slice 1's "upload as workflow artifact only" was always meant to

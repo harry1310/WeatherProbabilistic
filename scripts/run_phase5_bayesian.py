@@ -71,9 +71,9 @@ OUT_DIR = ROOT / "reports" / "phase5a_artefacts"
 POSTERIOR_DIR = OUT_DIR / "posteriors"
 PREDICTIONS_DIR = OUT_DIR / "predictions"
 
-SAMPLER_DRAWS = 2000
-SAMPLER_TUNE = 2000
-SAMPLER_CHAINS = 4
+DEFAULT_SAMPLER_DRAWS = 2000
+DEFAULT_SAMPLER_TUNE = 2000
+DEFAULT_SAMPLER_CHAINS = 4
 RANDOM_SEED = 42
 
 
@@ -88,6 +88,17 @@ def main() -> None:
               "the dry-tail floor materially vs the 8-feature default. Off "
               "by default until promoted to production."),
     )
+    # CLI overrides for sampler size — primarily for CI smoke-tests
+    # diagnosing why blackjax's chain_method="parallel" pmap occasionally
+    # falls back to sequential. Compare 1-chain vs 4-chain wall-time at
+    # small draws to detect: parallel ≈ 1.5× sequential, fallback ≈ 4×.
+    # Production retrains use the defaults (2000/2000/4).
+    p.add_argument("--draws",  type=int, default=DEFAULT_SAMPLER_DRAWS,
+                   help="Per-chain post-warmup draws (default 2000).")
+    p.add_argument("--tune",   type=int, default=DEFAULT_SAMPLER_TUNE,
+                   help="Per-chain warmup draws (default 2000).")
+    p.add_argument("--chains", type=int, default=DEFAULT_SAMPLER_CHAINS,
+                   help="Number of MCMC chains (default 4).")
     args = p.parse_args()
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -149,7 +160,19 @@ def main() -> None:
         print("Phase 5a guard FAIL — skipping sample. Existing posterior + bundle stay live.")
         sys.exit(4)
 
-    print(f"\n[{time.strftime('%H:%M:%S')}] Fitting single partial-pool posterior across all leads")
+    # JAX device check at sample start so the log captures whether pmap
+    # has access to multiple devices. Useful for diagnosing chain-method
+    # fallback when wall-time exceeds expectations.
+    try:
+        import jax
+        print(f"[{time.strftime('%H:%M:%S')}] JAX devices: {jax.devices()} "
+              f"(local count={jax.local_device_count()}, total={jax.device_count()})")
+    except Exception as e:
+        print(f"[{time.strftime('%H:%M:%S')}] JAX device probe failed: {e}")
+
+    print(f"\n[{time.strftime('%H:%M:%S')}] Fitting partial-pool posterior — "
+          f"chains={args.chains}, tune={args.tune}, draws={args.draws}, "
+          f"n_obs={len(ds.X_train_s):,}")
     t0 = time.time()
     fit = fit_partial_pooling(
         X_train_s=ds.X_train_s,
@@ -157,7 +180,7 @@ def main() -> None:
         station_idx_train=ds.station_idx_train,
         station_codes=ds.station_codes,
         feature_names=ds.feature_names,
-        draws=SAMPLER_DRAWS, tune=SAMPLER_TUNE, chains=SAMPLER_CHAINS,
+        draws=args.draws, tune=args.tune, chains=args.chains,
         target_accept=0.9, random_seed=RANDOM_SEED, progressbar=True,
     )
     print(f"[{time.strftime('%H:%M:%S')}] Posterior fit in {(time.time()-t0)/60:.1f} min")
