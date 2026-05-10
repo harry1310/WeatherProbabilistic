@@ -74,11 +74,15 @@ on:
         type: string
 
 concurrency:
-  # Distinct from weatherprobabilistic-train-4a (the existing 4a-only
-  # workflow's group) so the two workflows don't queue against each
-  # other — the 4a-only workflow stays available for one-off targeted
-  # retrains while this one drives the full Sunday sweep.
-  group: weatherprobabilistic-retrain-${{ inputs.phases }}
+  # Production retrains with default sampler size share the same key per
+  # `phases` so the Sunday cron never runs two simultaneous 5a fits that
+  # race for the R2 push slot. Smoke tests with explicit sampler_chains/
+  # sampler_draws overrides get distinct keys so they CAN run in parallel
+  # — useful for parallelism diagnostics (compare 1-chain vs 4-chain
+  # wall times in parallel rather than back-to-back). Empty input
+  # collapses to the literal "default" tag so the production key shape
+  # stays unchanged.
+  group: weatherprobabilistic-retrain-${{ inputs.phases }}-${{ inputs.sampler_chains || 'default' }}-${{ inputs.sampler_draws || 'default' }}
   cancel-in-progress: false
 
 jobs:
