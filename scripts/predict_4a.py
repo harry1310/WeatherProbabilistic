@@ -1,24 +1,26 @@
-"""Phase 4a — PREDICT ONLY. Loads the saved BART state from the latest
-versioned bundle in data/models/precipitation/{station}/{version}/,
-applies it to fresh live forecast features, writes predictions parquet
-under the SAME version (4× per day under different date= partitions).
+"""Phase 4a — PREDICT ONLY. Loads N per-lead BART states from the
+latest bundle and dispatches predictions per lead.
 
-Pre-split this script also did the training fit (~24 min wall, ran daily
-piggybacking on the noon ERA5 tick). Now training is its own workflow
-(train_4a.py + train-4a.yml) that emits a state.rds bundle, and this
-script just rehydrates and predicts on each 6-hourly cycle (~30s wall).
+Bundle layout produced by train_4a.py:
+  data/models/precipitation/{station}/{version}_phase4a/
+    state_lead_24h.rds  arrays_lead_24h.npz  ... (one per lead)
+    preprocess.json (per-lead blocks: median, scaler, kept_indices)
 
-Load pattern (verified bit-exact via scripts/smoke_dbarts_roundtrip.py):
-  1. Read state.rds + arrays.npz + preprocess.json from the latest
-     versioned bundle dir for each station.
-  2. Build a tiny warm scaffold: bart(X_train_s, y_train, ntree=50,
-     nskip=1, ndpost=1, keeptrees=TRUE, seed=SEED) on the SAME scaled
-     training inputs (~1s). This reproduces the original binary
-     detection + cutpoint inference that setState requires.
-  3. warm$fit$setState(bundle$state) — injects the saved 500 trees ×
-     1000 draws in place of the throwaway 50-tree warmup.
-  4. predict(warm, newdata=x_live_scaled) returns probabilities (auto-
-     pnorm for binary) of shape (ndpost, n_live).
+Load pattern per (station, lead):
+  1. Read this lead's state_lead_NNh.rds + arrays_lead_NNh.npz + per-lead
+     preprocess block.
+  2. Build a tiny warm scaffold on this lead's scaled training inputs.
+  3. setState(saved state) — injects the saved 500 trees × 1000 draws.
+  4. predict(warm, newdata=this_lead's_scaled_live_features) →
+     (ndpost, n_rows_for_this_lead) probability draws.
+  5. Concatenate across leads; write predictions parquet under
+     model_version=v..._phase4a/date=YYYY-MM-DD/.
+
+Old lead-pooled bundles (`v..._phase4a` with a flat state.rds at the
+root instead of per-lead state_lead_NNh.rds files) exist on disk
+from before the 2026-05-11 retirement of the lead-pooled flavour.
+find_latest_bundle filters them out by requiring the per-lead state
+files; they're harmless orphans.
 
 CLI:
     predict_4a.py [--anchor YYYY-MM-DD] [--stations slug1 ...]
@@ -76,68 +78,61 @@ dbarts = importr("dbarts")
 
 PHASE = "4a"
 STATIONS = ["ea_bellever_dartmoor", "ea_bovey_tracey", "ea_dartmoor_nr_hexworthy"]
-# Mirror of train_4a.py LEADS — 12 dropped 2026-05-10 (no offset_day
-# archive coverage at lead 12 → TestRows=0 in training metadata; query
-# was pure extrapolation). Keep both lists in lockstep.
 LEADS = [24, 48, 72, 96, 120]
 HORIZON_DAYS = 7
 
-# Warm-scaffold knobs. NSKIP + NDPOST stay tiny — they're sampling
-# parameters and setState replaces both with the saved draws. NTREE,
-# however, is STRUCTURAL: setState only fills slots that the scaffold
-# already has, so a scaffold with fewer trees silently truncates the
-# saved state and predictions collapse toward climatology (verified
-# 2026-05-10 — synthetic 500-save / 50-load reproduces the production
-# regression to mean ≈ base rate, std ≈ 0.08 vs original std 0.40).
-# Read NTREE from preprocess.json so the scaffold always matches the
-# state's tree count without a constant to drift.
+# Same warm-scaffold rationale as predict_4a.py: NTREE is structural,
+# NSKIP/NDPOST are throwaway. Read NTREE from preprocess.json's per-lead
+# block (all leads share the same NTREE in current code, but pinning
+# from disk avoids constant drift if hyperparams ever diverge per lead).
 WARM_NSKIP = 1
 WARM_NDPOST = 1
-
 
 _VERSION_RE = re.compile(r"^v\d{4}-\d{2}-\d{2}_\d{6}_phase4a$")
 
 
 def find_latest_bundle(models_root: Path, station_slug: str) -> Path:
-    """Pick the most recent v<date>_<HHMMSS>_phase4a/ dir under
-    {models_root}/precipitation/{station_slug}/. Lexicographic sort
-    works because the version timestamp prefix is fixed-width.
+    """Pick the most recent v..._phase4a/ dir that has the per-cell
+    bundle layout (state_lead_NNh.rds + arrays_lead_NNh.npz files).
+    Old lead-pooled bundles also matched the `v..._phase4a` name
+    pattern but only have a flat `state.rds` at the root — they're
+    filtered out here and become harmless orphans on disk.
     """
     parent = models_root / "precipitation" / station_slug
     if not parent.is_dir():
         raise FileNotFoundError(
             f"no model dir for station {station_slug!r} under {parent}. "
-            f"Run train_4a.py first to mint an initial bundle."
-        )
-    candidates = sorted(
+            f"Run train_4a.py first.")
+    name_matches = sorted(
         (d for d in parent.iterdir() if d.is_dir() and _VERSION_RE.match(d.name)),
         key=lambda d: d.name,
+        reverse=True,
     )
-    if not candidates:
+    if not name_matches:
         raise FileNotFoundError(
             f"no *_phase4a versions found under {parent}. "
-            f"Run train_4a.py to mint one."
-        )
-    latest = candidates[-1]
-    # Sanity-check the bundle is complete; predict-time partial bundles
-    # would silently fall back to a wrong feature shape and emit garbage.
-    required = ["state.rds", "arrays.npz", "preprocess.json"]
+            f"Run train_4a.py to mint one.")
+    # Pick the newest bundle that ALSO has the per-cell layout.
+    required = ["preprocess.json"] + [f"state_lead_{L}h.rds" for L in LEADS] + [f"arrays_lead_{L}h.npz" for L in LEADS]
+    for candidate in name_matches:
+        missing = [r for r in required if not (candidate / r).is_file()]
+        if not missing:
+            return candidate
+    # All matching dirs are old lead-pooled bundles. Report the latest's
+    # missing files so the user knows it's a retire-vs-retrain situation.
+    latest = name_matches[0]
     missing = [r for r in required if not (latest / r).is_file()]
-    if missing:
-        raise FileNotFoundError(
-            f"bundle {latest} missing required files: {missing}. "
-            f"Re-run train_4a.py."
-        )
-    return latest
+    raise FileNotFoundError(
+        f"latest bundle {latest} is lead-pooled layout (missing {missing}). "
+        f"Run train_4a.py to mint a per-cell bundle.")
 
 
-def build_pooled_live_features(station_friendly: str, anchor: datetime) -> pd.DataFrame:
-    """Live (post-anchor) forecast features pooled across LEADS with a
-    `lead` column. Mirrors train-time features except RunTimeSource is
-    'reported' (live forecast tree, date-partitioned) instead of
-    'offset_day' (training archive). Small distribution shift between
-    the two is documented in the script-level comments of the original
-    train+predict combo and accepted for the MVP.
+def build_live_features(station_friendly: str, anchor: datetime) -> pd.DataFrame:
+    """Live forecast features pooled across LEADS. Same DuckDB query as
+    predict_4a.build_pooled_live_features — identical underlying NWP +
+    derived features (precip stats, wind synoptic, hour/doy cyclical).
+    The `lead` column comes back attached; per-cell predict filters by
+    it lead-by-lead rather than passing lead as a model feature.
     """
     fc_glob = str((WEATHERBLEND_DATA_ROOT / "forecasts" / "**" / "*.parquet")).replace("\\", "/")
     model_in = "(" + ",".join(f"'{full}'" for full, _ in MODELS_LEAN) + ")"
@@ -206,42 +201,36 @@ def build_pooled_live_features(station_friendly: str, anchor: datetime) -> pd.Da
     df["doy_cos"]  = np.cos(doy_angle)
 
     df = df.rename(columns={"LeadHours": "lead"})
-    df["lead"] = df["lead"].astype(float)
+    df["lead"] = df["lead"].astype(int)   # per-cell: integer lead matches dict keys
     return df
 
 
-def predict_one_station(bundle_dir: Path, station_friendly: str,
-                        anchor: datetime) -> pd.DataFrame:
-    preprocess = json.loads((bundle_dir / "preprocess.json").read_text())
-    arrays = np.load(bundle_dir / "arrays.npz")
+def predict_one_cell(bundle_dir: Path, lead: int, df_lead: pd.DataFrame,
+                     preprocess_lead: dict) -> pd.DataFrame:
+    """Score one (station, lead) cell. Loads this lead's state.rds,
+    builds a warm scaffold on its arrays.npz, setStates, predicts on
+    df_lead's rows. Returns the per-row predictions parquet shape."""
+    arrays = np.load(bundle_dir / f"arrays_lead_{lead}h.npz")
     X_train_s = arrays["X_train_s"]
     y_train   = arrays["y_train"]
 
-    feature_list_full = preprocess["feature_list_full"]
-    kept_indices      = np.array(preprocess["kept_indices"], dtype=int)
-    median            = np.array(preprocess["median"], dtype="float64")
-    scaler_mean       = np.array(preprocess["scaler_mean"], dtype="float64")
-    scaler_scale      = np.array(preprocess["scaler_scale"], dtype="float64")
+    feature_list_full = preprocess_lead["feature_list_full"]
+    kept_indices      = np.array(preprocess_lead["kept_indices"], dtype=int)
+    median            = np.array(preprocess_lead["median"], dtype="float64")
+    scaler_mean       = np.array(preprocess_lead["scaler_mean"], dtype="float64")
+    scaler_scale      = np.array(preprocess_lead["scaler_scale"], dtype="float64")
+    feature_names_eff = preprocess_lead["feature_names_eff"]
 
-    print(f"  bundle: {bundle_dir.name}", flush=True)
-    print(f"  features eff: {len(preprocess['feature_names_eff'])} | "
-          f"x_train: {X_train_s.shape}", flush=True)
-
-    print(f"  building pooled live features (horizon {HORIZON_DAYS}d)...", flush=True)
-    df_live = build_pooled_live_features(station_friendly, anchor)
-    if len(df_live) == 0:
-        print(f"  no live feature rows past anchor — emitting nothing", flush=True)
-        return pd.DataFrame()
-
-    X_live_full = df_live[feature_list_full].to_numpy(dtype="float64")
+    X_live_full = df_lead[feature_list_full].to_numpy(dtype="float64")
     X_live = X_live_full[:, kept_indices]
     X_live = np.where(np.isnan(X_live), median, X_live)
     X_live_s = ((X_live - scaler_mean) / scaler_scale).astype(np.float64)
-    print(f"  live: {len(df_live):,} rows", flush=True)
 
-    warm_ntree = int(preprocess["ntree"])
-    print(f"  building warm scaffold (ntree={warm_ntree}, nskip={WARM_NSKIP}, "
-          f"ndpost={WARM_NDPOST})...", flush=True)
+    print(f"    lead {lead}h | features eff: {len(feature_names_eff)} | "
+          f"live rows: {len(df_lead):,} | x_train: {X_train_s.shape}", flush=True)
+
+    # Warm scaffold + setState — same pattern as predict_4a.py.
+    warm_ntree = int(preprocess_lead.get("ntree", 500))
     t0 = time.time()
     with localconverter(_RCONVERT):
         x_train_r = ro.conversion.py2rpy(X_train_s)
@@ -249,26 +238,22 @@ def predict_one_station(bundle_dir: Path, station_friendly: str,
     warm = dbarts.bart(
         x_train=x_train_r, y_train=y_train_r,
         ntree=warm_ntree, nskip=WARM_NSKIP, ndpost=WARM_NDPOST,
-        keeptrees=True, verbose=False, seed=preprocess.get("seed", 42),
+        keeptrees=True, verbose=False, seed=preprocess_lead.get("seed", 42),
     )
     ro.globalenv["warm"] = warm
 
-    state_path = (bundle_dir / "state.rds").as_posix()
+    state_path = (bundle_dir / f"state_lead_{lead}h.rds").as_posix()
     ro.r(f'bundle <- readRDS("{state_path}")')
     ro.r('warm$fit$setState(bundle$state)')
-    print(f"  setState done in {time.time() - t0:.1f}s — predicting...", flush=True)
 
-    t1 = time.time()
     with localconverter(_RCONVERT):
         x_live_r = ro.conversion.py2rpy(X_live_s)
     ro.globalenv["x_live"] = x_live_r
     pred_r = ro.r('predict(warm, newdata = x_live)')
     with localconverter(_RCONVERT):
-        # predict.bart for binary returns probabilities directly (auto-
-        # pnorm). Shape: (ndpost, n_live).
         p_draws = np.array(ro.conversion.rpy2py(pred_r))
-    print(f"  predict done in {time.time() - t1:.1f}s — draws shape {p_draws.shape}",
-          flush=True)
+    print(f"    lead {lead}h predict done in {time.time() - t0:.1f}s — "
+          f"draws shape {p_draws.shape}", flush=True)
 
     p_mean = p_draws.mean(axis=0)
     q05 = np.quantile(p_draws, 0.05, axis=0)
@@ -278,8 +263,8 @@ def predict_one_station(bundle_dir: Path, station_friendly: str,
     q95 = np.quantile(p_draws, 0.95, axis=0)
 
     return pd.DataFrame({
-        "ValidTimeUtc": df_live["ValidTimeUtc"],
-        "LeadHours":    df_live["lead"].astype(int),
+        "ValidTimeUtc": df_lead["ValidTimeUtc"].values,
+        "LeadHours":    lead,
         "ProbWet":      p_mean,
         "ProbWetStd":   p_draws.std(axis=0),
         "ProbWetQ05":   q05,
@@ -292,11 +277,74 @@ def predict_one_station(bundle_dir: Path, station_friendly: str,
     })
 
 
+def predict_one_station(bundle_dir: Path, station_friendly: str,
+                        anchor: datetime) -> pd.DataFrame:
+    preprocess = json.loads((bundle_dir / "preprocess.json").read_text())
+    if "per_lead" not in preprocess:
+        raise ValueError(
+            f"bundle {bundle_dir} has no `per_lead` block in preprocess.json — "
+            f"likely a lead-pooled 4a bundle (use predict_4a.py instead).")
+
+    print(f"  bundle: {bundle_dir.name}", flush=True)
+    print(f"  building live features (horizon {HORIZON_DAYS}d)...", flush=True)
+    df_live = build_live_features(station_friendly, anchor)
+    if len(df_live) == 0:
+        print(f"  no live feature rows past anchor — emitting nothing", flush=True)
+        return pd.DataFrame()
+    print(f"  live: {len(df_live):,} rows across leads {sorted(df_live['lead'].unique().tolist())}",
+          flush=True)
+
+    per_lead_outputs: list[pd.DataFrame] = []
+    for lead in LEADS:
+        if str(lead) not in preprocess["per_lead"]:
+            print(f"    lead {lead}h: not in bundle's preprocess — skipping")
+            continue
+        df_lead = df_live[df_live["lead"] == lead].reset_index(drop=True)
+        if len(df_lead) == 0:
+            print(f"    lead {lead}h: no live rows for this lead — skipping")
+            continue
+        preprocess_lead = preprocess["per_lead"][str(lead)]
+        # Carry NTREE from the top-level preprocess so we don't re-read
+        # it per-cell; the train script writes one NTREE for the whole
+        # bundle today.
+        preprocess_lead.setdefault("ntree", preprocess.get("ntree", 500))
+        preprocess_lead.setdefault("seed", preprocess.get("seed", 42))
+        out = predict_one_cell(bundle_dir, lead, df_lead, preprocess_lead)
+        per_lead_outputs.append(out)
+        # Free R-side warm + bundle state before the next lead so peak
+        # RAM stays bounded across the lead loop.
+        ro.r('rm(warm, bundle, x_live); gc()')
+
+    if not per_lead_outputs:
+        return pd.DataFrame()
+    return pd.concat(per_lead_outputs, ignore_index=True).sort_values(
+        ["ValidTimeUtc", "LeadHours"], kind="mergesort").reset_index(drop=True)
+
+
+def write_predictions_parquet(predictions_root: Path, station_slug: str,
+                              bundle_name: str, anchor: datetime,
+                              predictions: pd.DataFrame) -> Path:
+    """Append-friendly write under model_version=<version>/date=<anchor>/.
+    Same pattern as predict_4a.py / predict_5a.py: one parquet per
+    (station, model_version, anchor-date) cycle."""
+    date_str = anchor.date().isoformat()
+    out_dir = (predictions_root / "precipitation" / station_slug
+               / f"model_version={bundle_name}" / f"date={date_str}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "predictions.parquet"
+    predictions = predictions.copy()
+    predictions["LocationName"]        = LOCATION
+    predictions["ModelVersion"]        = bundle_name
+    predictions["TruthStation"]        = station_slug
+    predictions["PredictionMadeAtUtc"] = datetime.now(timezone.utc)
+    predictions.to_parquet(out_path, index=False)
+    return out_path
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--anchor", default=None,
-                   help="Anchor date YYYY-MM-DD UTC (default: today). Predict "
-                        "valid times in (anchor, anchor+7d).")
+                   help="Anchor date YYYY-MM-DD UTC (default: today).")
     p.add_argument("--stations", nargs="*", default=None,
                    help="Station subset (default: all 3 active).")
     p.add_argument("--predictions-root", default=str(WEATHERBLEND_DATA_ROOT / "predictions"),
@@ -315,55 +363,35 @@ def main() -> None:
     predictions_root = Path(args.predictions_root)
     models_root = Path(args.models_root)
 
-    print(f"[{time.strftime('%H:%M:%S')}] Phase 4a PREDICT (state-loading)")
-    print(f"  anchor:  {anchor.isoformat()}")
+    print(f"[{time.strftime('%H:%M:%S')}] Phase 4a per-cell PREDICT")
+    print(f"  anchor:   {anchor.isoformat()}")
     print(f"  stations: {stations}")
-    print(f"  leads (pooled feature): {LEADS}")
-    print(f"  horizon: {HORIZON_DAYS} days")
+    print(f"  leads:    {LEADS}")
+    print(f"  horizon:  {HORIZON_DAYS} days")
 
     rows_written = 0
-    failures = []
     for station_input in stations:
         station_slug, station_friendly = resolve_station(station_input)
         print(f"\n[{time.strftime('%H:%M:%S')}] {station_friendly}")
         try:
             bundle_dir = find_latest_bundle(models_root, station_slug)
-            live_preds = predict_one_station(bundle_dir, station_friendly, anchor)
-        except Exception as e:
-            print(f"  FAILED — {e}")
-            failures.append((station_slug, str(e)))
+        except FileNotFoundError as e:
+            print(f"  WARN: {e}")
             continue
-        finally:
-            # Drop the warm fit before the next station so peak RAM stays bounded.
-            ro.r('if (exists("warm")) rm(warm); if (exists("bundle")) rm(bundle); '
-                 'if (exists("x_live")) rm(x_live); gc()')
-
-        if len(live_preds) == 0:
-            print(f"  no live predictions emitted for {station_slug}")
+        preds = predict_one_station(bundle_dir, station_friendly, anchor)
+        if preds.empty:
+            print(f"  no predictions emitted for {station_slug}")
             continue
-
-        # LocationName is the C# renderer's filter target; without it
-        # union_by_name fills NULL on read and the WHERE filter drops
-        # every 4a row from the site.
-        version = bundle_dir.name
-        live_preds["LocationName"] = LOCATION
-        live_preds["ModelVersion"] = version
-        live_preds["TruthStation"] = station_slug
-        live_preds["PredictionMadeAtUtc"] = datetime.now(timezone.utc).replace(tzinfo=None)
-        date_str = anchor.strftime("%Y-%m-%d")
-        out_dir = (predictions_root / "precipitation" / station_slug
-                   / f"model_version={version}" / f"date={date_str}")
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / "predictions.parquet"
-        live_preds.to_parquet(out_path, index=False)
-        print(f"  → {out_path}  ({len(live_preds):,} rows, "
-              f"P(wet) mean {live_preds['ProbWet'].mean():.3f})")
-        rows_written += len(live_preds)
+        out_path = write_predictions_parquet(predictions_root, station_slug,
+                                              bundle_dir.name, anchor, preds)
+        print(f"  wrote {len(preds):,} rows → {out_path}")
+        rows_written += len(preds)
+        # Per-station R-side cleanup so the next station starts fresh.
+        ro.r('gc()')
 
     print()
-    print(f"Phase 4a predict complete. Prediction rows: {rows_written:,}")
-    if failures:
-        print(f"  failures: {failures}")
+    print(f"Phase 4a per-cell predict complete. Rows written: {rows_written:,}")
+    if rows_written == 0:
         sys.exit(1)
 
 

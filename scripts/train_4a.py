@@ -1,38 +1,45 @@
-"""Phase 4a — TRAINING ONLY. Fits the dbarts BART precip blender once
-per station, persists the saved state + preprocess + metadata under
-data/models/precipitation/{station}/{version}/, and exits. Live
-prediction is the job of predict_4a.py, which loads the saved state on
-its own cadence (4×/day).
+"""Phase 4a — TRAINING ONLY. Fits one dbarts BART per (station, lead)
+and persists per-cell state + preprocess + metadata under
+data/models/precipitation/{station}/{version}_phase4a/.
 
-This split was unblocked once we verified the dbarts state round-trips
-bit-exactly via storeState + saveRDS → readRDS + warm-scaffold +
-setState (see scripts/smoke_dbarts_roundtrip.py + memory
-reference_dbarts_serialize_caveat.md). Pre-split, train+predict ran in a
-single R session because earlier (incorrect) experiments suggested
-predict-from-fresh-session always fell back to Y.mean(); the missing
-piece was the explicit storeState() call.
+Per-cell architecture: each (station, lead) gets its own BART fit on
+its own ~14k-row slice, with no `lead` feature column. Matches 3a's
+per-cell architecture and recovers the -4.0% aggregate Brier advantage
+that the previous lead-pooled 4a gave up (see WB bake-off 2026-05-10).
 
-Bundle layout written per station per version:
-  data/models/precipitation/{station}/{version}/
-    state.rds              — saveRDS(list(state = fit$fit$state))
-    arrays.npz             — X_train_s (already scaled+imputed) + y_train
-                             — the warm scaffold needs IDENTICAL training
-                             inputs to reproduce the original binary
-                             detection + cutpoint inference, so we save
-                             the scaled arrays (not raw) to skip preprocess
-                             reapplication on the warm fit
-    preprocess.json        — kept feature names + indices, median fill
-                             values, StandardScaler mean/scale — the
-                             predict-side reapplies these to live raw
-                             features before predict()
-    training_metadata.json — Models card + Spec page payload (existing schema)
-    feature_schema.json    — per-lead schema for the Spec page (existing)
+The lead-pooled 4a flavour was retired 2026-05-11 in favour of
+per-cell — the aligned-row bake-off showed per-cell beats lead-pooled
+by ~6% Brier and the diversity-ceiling analysis showed the linear
+pool of the two flavours added literally zero, so keeping both was
+redundant. Old lead-pooled bundles (`v..._phase4a` with a flat
+state.rds at the root) become stale immediately after the first
+per-cell retrain — find_latest_bundle in predict_4a.py filters them
+out by requiring per-lead state_lead_NNh.rds files.
 
-CLI:
-    train_4a.py [--stations slug1 ...]  [--anchor YYYY-MM-DD]
+Deployment posture: 4a stays a CHALLENGER alongside 3a (3a Current).
+Bovey-specific underperformance (per-cell BART loses by 0.8-4.6% on
+Bovey cells) is accepted as a known caveat at this stage.
 
-The anchor is informational only — training does not slice by it; it's
-written into the version string + metadata for traceability.
+Bundle layout per station per version::
+
+  data/models/precipitation/{station}/{version}_phase4a/
+    state_lead_24h.rds         saveRDS(list(state = fit$fit$state)) per lead
+    state_lead_48h.rds
+    state_lead_72h.rds
+    state_lead_96h.rds
+    state_lead_120h.rds
+    arrays_lead_24h.npz        X_train_s + y_train (scaled, imputed) per lead
+    arrays_lead_48h.npz        (needed for warm-scaffold predict-side replay)
+    ... (one per lead)
+    preprocess.json            {"24": {feature_names_eff, kept_indices, median,
+                                       scaler_mean, scaler_scale}, "48": {...}, ...}
+                                — per-lead preprocess since each lead has its
+                                own NaN pattern and scaler params.
+    training_metadata.json     PerLead populated for 5 leads (Models card)
+    training_summary.json      RetrainGuard sidecar (per-station-aggregated)
+    feature_schema.json        per-lead spec (Spec page)
+    test_predictions.parquet   per-row (valid_time, station, lead, p_wet,
+                                observed_wet) across all 5 leads
 """
 from __future__ import annotations
 
@@ -85,12 +92,12 @@ from _shared import (  # noqa: E402
     resolve_station,
     time_split,
 )
+from run_phase6_bart_bakeoff import brier  # noqa: E402
 
 _RCONVERT = default_converter + numpy2ri.converter + pandas2ri.converter
 ro.r(f'.libPaths(c("{_user_lib.replace(os.sep, "/")}", .libPaths()))')
 dbarts = importr("dbarts")
 
-# Champion config locked from the Phase 6 9-cell bake-off.
 NTREE = 500
 K = 3.0
 NSKIP = 200
@@ -99,87 +106,66 @@ SEED = 42
 PHASE = "4a"
 
 STATIONS = ["ea_bellever_dartmoor", "ea_bovey_tracey", "ea_dartmoor_nr_hexworthy"]
-# Lead 12 dropped 2026-05-10 — Open-Meteo's offset_day (previous_runs)
-# archive doesn't return lead 12 forecasts that go far enough back to
-# survive the train/val/test split, so per-lead test stats came back with
-# TestRows=0 for lead 12 in the v2026-05-09 bundle. The pooled fit still
-# included lead 12 nominally but had effectively no learning signal there,
-# making predict-time output pure extrapolation along the `lead` axis.
-# Keeping {24, 48, 72, 96, 120} where every bucket has ~14k train rows
-# and a real BSS vs climatology.
+# All 5 leads (24/48/72/96/120). The original 9-cell research scope was
+# {24, 48, 72} only; we extend to 96/120 here because the per-cell
+# architecture should scale cleanly and the long-lead skill is what
+# the Models card needs to show. As a challenger deployment, the
+# downside of extending is minimal — worst case the long-lead per-cell
+# numbers underperform and the Models card just shows that.
 LEADS = [24, 48, 72, 96, 120]
 
 
-def build_pooled_training_features(station_friendly: str) -> pd.DataFrame:
-    """Pool every lead in LEADS into one DataFrame with a `lead` column.
-
-    SORT ORDER: time_split is positional 70/15/15. Sorting by
-    (ValidTimeUtc, lead) ensures every lead contributes proportionally
-    to each split slice — without this, leads would land in disjoint
-    blocks and per-lead test Brier would collapse to NaN for most leads.
-    """
-    frames = []
-    for lead in LEADS:
-        df = build_features_via_duckdb(station_friendly, lead)
-        df, _syn_feats = add_synoptic_features(station_friendly, lead, df)
-        df["lead"] = float(lead)
-        frames.append(df)
-    pooled = pd.concat(frames, ignore_index=True)
-    pooled = pooled.sort_values(["ValidTimeUtc", "lead"], kind="mergesort").reset_index(drop=True)
-    return pooled
-
-
-def _brier(p: np.ndarray, y: np.ndarray) -> float:
-    return float(np.mean((p - y) ** 2))
-
-
-def train_one_station(station_friendly: str) -> dict:
-    """Fit dbarts on pooled training features, evaluate on the held-out
-    test slice (passed as x.test in the same fit), return everything the
-    bundle writer needs.
-    """
-    syn_feats = ["wind_dir_sin_mean", "wind_dir_cos_mean", "surface_pressure_mean"]
-    feats = list(FEATURE_NAMES) + syn_feats + ["lead"]
-
-    print(f"  building pooled training features ({len(LEADS)} leads)...", flush=True)
-    df_pooled = build_pooled_training_features(station_friendly)
-    train_df, val_df, test_df = time_split(df_pooled)
-
-    X_train_full = train_df[feats].to_numpy(dtype="float64")
-    y_train      = train_df["wet"].to_numpy(dtype="float64")
-    X_test_full  = test_df[feats].to_numpy(dtype="float64")
-    y_test       = test_df["wet"].to_numpy(dtype="int8")
-
-    # Drop columns that are all-NaN in training — fixes the kept-columns
-    # mask we'll re-apply on the predict side. Live features MUST drop
-    # the same indices or the saved state's tree splits won't line up.
+def _prepare_cell(df: pd.DataFrame, feature_list: list[str]):
+    """Per-cell prep mirrors run_phase6_bart_9cell's prepare_full but
+    returns the scaler/median/kept_indices for bundle persistence. The
+    predict side needs these to map live features into the same scaled
+    space the saved state was fit in."""
+    train_df, val_df, test_df = time_split(df)
+    X_train_full = train_df[feature_list].to_numpy(dtype="float64")
+    y_train = train_df["wet"].to_numpy(dtype="float64")
+    X_test_full = test_df[feature_list].to_numpy(dtype="float64")
+    y_test = test_df["wet"].to_numpy(dtype="int8")
     col_all_nan = np.isnan(X_train_full).all(axis=0)
     kept = np.where(~col_all_nan)[0]
-    feature_names_eff = [feats[i] for i in kept]
     X_train = X_train_full[:, kept]
-    X_test  = X_test_full[:, kept]
-    print(f"  train: {len(y_train):,} | val: {len(val_df):,} | test: {len(y_test):,} | "
-          f"features eff: {len(feature_names_eff)}", flush=True)
-
+    X_test = X_test_full[:, kept]
     median = np.nanmedian(X_train, axis=0)
     X_train = np.where(np.isnan(X_train), median, X_train)
-    X_test  = np.where(np.isnan(X_test),  median, X_test)
+    X_test = np.where(np.isnan(X_test), median, X_test)
     scaler = StandardScaler().fit(X_train)
-    X_train_s = scaler.transform(X_train).astype(np.float64)
-    X_test_s  = scaler.transform(X_test).astype(np.float64)
+    feature_names_eff = [feature_list[i] for i in kept]
+    return {
+        "X_train_s":         scaler.transform(X_train),
+        "y_train":           y_train,
+        "X_test_s":          scaler.transform(X_test),
+        "y_test":            y_test,
+        "train_df":          train_df,
+        "val_df":            val_df,
+        "test_df":           test_df,
+        "feature_list_full": feature_list,
+        "kept_indices":      kept.tolist(),
+        "feature_names_eff": feature_names_eff,
+        "median":            median.tolist(),
+        "scaler_mean":       scaler.mean_.tolist(),
+        "scaler_scale":      scaler.scale_.tolist(),
+    }
 
-    print(f"  fitting dbarts (ntree={NTREE}, k={K}, nskip={NSKIP}, ndpost={NDPOST})...",
-          flush=True)
-    t0 = time.time()
+
+def _fit_and_store(cell: dict, lead: int) -> dict:
+    """Fit dbarts on the prepped cell, score test, store state in R's
+    globalenv under a lead-specific name so we can saveRDS it after."""
+    X_train_s = cell["X_train_s"].astype(np.float64)
+    y_train   = cell["y_train"].astype(np.float64)
+    X_test_s  = cell["X_test_s"].astype(np.float64)
     with localconverter(_RCONVERT):
         x_train_r = ro.conversion.py2rpy(X_train_s)
         y_train_r = ro.conversion.py2rpy(y_train)
         x_test_r  = ro.conversion.py2rpy(X_test_s)
-    # verbose=True so dbarts emits per-block sampler progress (tens of
-    # lines over the 200-burn + 1000-post run). Without this the fit
-    # is silent for ~8 min on Ubuntu CI / ~30 min on Windows; no way to
-    # tell a slow fit from a hung one. flush=True up-stream + R's
-    # own stderr flushing means lines land in the CI log in real time.
+    t0 = time.time()
+    # verbose=True so dbarts emits per-block progress to stderr — without
+    # it the per-cell fit is silent for several minutes and CI/local
+    # logs can't tell a slow fit from a hung one. Same convention as
+    # train_4a.py and run_phase6_bart_9cell.
     fit = dbarts.bart(
         x_train=x_train_r, y_train=y_train_r, x_test=x_test_r,
         ntree=NTREE, k=K, nskip=NSKIP, ndpost=NDPOST,
@@ -189,229 +175,214 @@ def train_one_station(station_friendly: str) -> dict:
     with localconverter(_RCONVERT):
         yhat_test = np.array(ro.conversion.rpy2py(yhat_test_r))
     p_test = norm.cdf(yhat_test).mean(axis=0)
-    print(f"  fit done in {(time.time() - t0) / 60:.1f} min", flush=True)
+    wall = time.time() - t0
 
-    # Per-lead test Brier for training_metadata.PerLead.
-    per_lead = []
-    test_lead = test_df["lead"].astype(int).to_numpy()
-    train_clim = float(train_df["wet"].mean())
-    for L in LEADS:
-        mask = test_lead == L
-        n = int(mask.sum())
-        if n == 0:
-            per_lead.append({"LeadHours": L, "TestRows": 0,
-                             "BlendTestMae": float("nan"), "BSS": float("nan")})
-            continue
-        p_l = p_test[mask]
-        y_l = y_test[mask]
-        b = _brier(p_l, y_l)
-        clim_b = _brier(np.full_like(y_l, train_clim, dtype="float64"), y_l)
-        bss = (clim_b - b) / clim_b if clim_b > 0 else float("nan")
-        per_lead.append({
-            "LeadHours":   L,
-            "TestRows":    n,
-            "ValRows":     int((val_df["lead"] == L).sum()),
-            "TrainRows":   int((train_df["lead"] == L).sum()),
-            "BlendTestMae": b,
-            "BSS":          bss,
-            "ClimatologyBrier": clim_b,
-            "BestSingle":   "(BART blender — pooled across NWPs)",
-            "BestSingleTestMae": float("nan"),
-        })
-
-    # Stash fit in globalenv for storeState — refclass methods aren't
-    # subscriptable from rpy2's S4 view, must invoke through ro.r().
-    ro.globalenv["fit"] = fit
-    ro.r('fit$fit$storeState()')
-
+    # Store state in R-side globalenv under a lead-keyed name. After
+    # ALL cells for this station are fit, we saveRDS each in turn.
+    # storeState mutates fit$fit$state to a serialisable form.
+    fit_var = f"fit_lead_{lead}h"
+    ro.globalenv[fit_var] = fit
+    ro.r(f'{fit_var}$fit$storeState()')
     return {
-        "fit_in_globalenv": True,  # fit is now ro.globalenv["fit"]
-        "per_lead":   per_lead,
-        "train_df":   train_df,
-        "val_df":     val_df,
-        "test_df":    test_df,
-        "feature_names_eff": feature_names_eff,
-        "kept_indices":      kept.tolist(),
-        "feature_list_full": feats,
-        "median":     median,
-        "scaler_mean":  scaler.mean_,
-        "scaler_scale": scaler.scale_,
-        "X_train_s":  X_train_s,
-        "y_train":    y_train,
-        # Per-row test predictions for downstream bake-offs (e.g. 3a+4a
-        # linear pool). Same shape and column conventions as 5a's
-        # test_predictions.parquet so a single bake-off script can
-        # consume both. y_test cast to int8 to match.
-        "p_test":     p_test,
-        "y_test":     y_test,
+        "p_test":   p_test,
+        "y_test":   cell["y_test"],
+        "wall_s":   wall,
+        "fit_var":  fit_var,
     }
 
 
-def write_bundle(out_dir: Path, station_slug: str, station_friendly: str,
-                 version: str, result: dict, anchor: datetime) -> None:
+def train_one_station(station_friendly: str, station_slug: str) -> dict:
+    """Fit per-cell BART for every lead in LEADS for one station.
+    Returns aggregate result dict with per-cell prep + fit info, ready
+    for write_per_cell_bundle to persist."""
+    syn_feats = ["wind_dir_sin_mean", "wind_dir_cos_mean", "surface_pressure_mean"]
+    base_feats = list(FEATURE_NAMES) + syn_feats   # NOTE: no "lead" — per-cell
+
+    per_cell: dict[int, dict] = {}
+    per_lead_stats: list[dict] = []
+    pred_frames: list[pd.DataFrame] = []
+
+    for lead in LEADS:
+        print(f"\n  [{time.strftime('%H:%M:%S')}] lead {lead}h — building features", flush=True)
+        df = build_features_via_duckdb(station_friendly, lead)
+        df, syn_feats_added = add_synoptic_features(station_friendly, lead, df)
+        feats = list(FEATURE_NAMES) + syn_feats_added
+        cell = _prepare_cell(df, feats)
+        print(f"    rows: train {len(cell['y_train']):,} · val {len(cell['val_df']):,} · "
+              f"test {len(cell['y_test']):,} · features kept {len(cell['feature_names_eff'])}", flush=True)
+
+        fit_out = _fit_and_store(cell, lead)
+        b = brier(fit_out["p_test"], fit_out["y_test"].astype(np.float64))
+        clim_b = brier(np.full_like(fit_out["y_test"], cell["train_df"]["wet"].mean(), dtype="float64"),
+                       fit_out["y_test"].astype(np.float64))
+        bss = (clim_b - b) / clim_b if clim_b > 0 else float("nan")
+        print(f"    fit done in {fit_out['wall_s']:.1f}s — BART Brier={b:.4f} (BSS {bss:+.4f}, clim {clim_b:.4f})", flush=True)
+
+        per_cell[lead] = {**cell, **fit_out}
+        per_lead_stats.append({
+            "LeadHours":         lead,
+            "TestRows":          int(len(fit_out["y_test"])),
+            "ValRows":           int(len(cell["val_df"])),
+            "TrainRows":         int(len(cell["y_train"])),
+            "BlendTestMae":      b,                                  # repurposed: Brier
+            "BSS":               bss,
+            "ClimatologyBrier":  clim_b,
+            "BestSingle":        "(per-cell BART)",
+            "BestSingleTestMae": float("nan"),
+            "DataRangeTrain":    (f"{cell['train_df']['ValidTimeUtc'].min()} → "
+                                  f"{cell['train_df']['ValidTimeUtc'].max()}"
+                                  if len(cell['train_df']) else ""),
+            "DataRangeVal":      (f"{cell['val_df']['ValidTimeUtc'].min()} → "
+                                  f"{cell['val_df']['ValidTimeUtc'].max()}"
+                                  if len(cell['val_df']) else ""),
+            "DataRangeTest":     (f"{cell['test_df']['ValidTimeUtc'].min()} → "
+                                  f"{cell['test_df']['ValidTimeUtc'].max()}"
+                                  if len(cell['test_df']) else ""),
+            "TestCalendarMonths": 4,
+        })
+        pred_frames.append(pd.DataFrame({
+            "valid_time":   pd.to_datetime(cell["test_df"]["ValidTimeUtc"].values),
+            "station":      station_slug,
+            "lead":         lead,
+            "p_wet":        fit_out["p_test"],
+            "observed_wet": fit_out["y_test"].astype("int8"),
+        }))
+
+    test_predictions = pd.concat(pred_frames, ignore_index=True) if pred_frames else pd.DataFrame()
+
+    # Aggregate train slice for the RetrainGuard summary. Use lead 24h's
+    # slice as the canonical per-station train (largest, same shape as
+    # 3a per-station guard). Per-lead feature stats would be richer but
+    # the guard helper expects one (rows, features) matrix.
+    canonical_lead = LEADS[0]
+    canonical = per_cell[canonical_lead]
+    train_features = canonical["X_train_s"]
+    feature_names = canonical["feature_names_eff"]
+
+    return {
+        "per_cell":          per_cell,
+        "per_lead_stats":    per_lead_stats,
+        "test_predictions":  test_predictions,
+        "train_features":    train_features,        # for RetrainGuard
+        "feature_names":     feature_names,
+        "y_train":           canonical["y_train"],
+    }
+
+
+def write_per_cell_bundle(out_dir: Path, station_slug: str, station_friendly: str,
+                          version: str, result: dict, anchor: datetime) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1) state.rds — saveRDS through R itself (the state is an R list of
-    # integer matrices; pickling it would lose the structure).
-    state_path = (out_dir / "state.rds").as_posix()
-    ro.globalenv["state_only"] = ro.r('list(state = fit$fit$state)')
-    ro.r(f'saveRDS(state_only, "{state_path}")')
+    # 1) state.rds per lead — saveRDS through R itself.
+    for lead, cell in result["per_cell"].items():
+        fit_var = cell["fit_var"]
+        rds_path = (out_dir / f"state_lead_{lead}h.rds").as_posix()
+        ro.globalenv["state_only"] = ro.r(f'list(state = {fit_var}$fit$state)')
+        ro.r(f'saveRDS(state_only, "{rds_path}")')
 
-    # 2) arrays.npz — the warm scaffold needs the IDENTICAL training
-    # inputs to reproduce binary detection + cutpoints. Save the SCALED
-    # versions so the warm fit replays them verbatim with no preprocess
-    # round-trip risk.
-    np.savez_compressed(
-        out_dir / "arrays.npz",
-        X_train_s=result["X_train_s"].astype(np.float64),
-        y_train=result["y_train"].astype(np.float64),
-    )
+    # 2) arrays_lead_NNh.npz per lead — warm-scaffold inputs.
+    for lead, cell in result["per_cell"].items():
+        np.savez_compressed(
+            out_dir / f"arrays_lead_{lead}h.npz",
+            X_train_s=cell["X_train_s"].astype(np.float64),
+            y_train=cell["y_train"].astype(np.float64),
+        )
 
-    # 3) preprocess.json — applied to LIVE raw features before predict()
-    # to map them into the same feature space the saved state was fit in.
+    # 3) preprocess.json — per-lead block, all in one file.
     preprocess = {
-        "feature_list_full":  result["feature_list_full"],
-        "kept_indices":       result["kept_indices"],
-        "feature_names_eff":  result["feature_names_eff"],
-        "median":             result["median"].tolist(),
-        "scaler_mean":        result["scaler_mean"].tolist(),
-        "scaler_scale":       result["scaler_scale"].tolist(),
-        "ntree":              NTREE,
-        "k":                  K,
-        "ndpost":             NDPOST,
-        "seed":               SEED,
-        "leads":              LEADS,
+        "ntree": NTREE, "k": K, "ndpost": NDPOST, "seed": SEED,
+        "leads": LEADS,
+        "per_lead": {
+            str(lead): {
+                "feature_list_full":  cell["feature_list_full"],
+                "kept_indices":       cell["kept_indices"],
+                "feature_names_eff":  cell["feature_names_eff"],
+                "median":             cell["median"],
+                "scaler_mean":        cell["scaler_mean"],
+                "scaler_scale":       cell["scaler_scale"],
+            }
+            for lead, cell in result["per_cell"].items()
+        },
     }
     (out_dir / "preprocess.json").write_text(json.dumps(preprocess, indent=2))
 
-    # 4) training_metadata.json + feature_schema.json — Models card + Spec
-    # page + verify pipeline payload. Schema unchanged from the previous
-    # train+predict combo so WeatherBlend's loader picks 4a up unchanged.
-    syn_feats = ["wind_dir_sin_mean", "wind_dir_cos_mean", "surface_pressure_mean"]
-    base_feats = list(FEATURE_NAMES) + syn_feats + ["lead"]
-    train_df = result["train_df"]
-    val_df   = result["val_df"]
-    test_df  = result["test_df"]
-    per_lead = result["per_lead"]
-    feature_names_eff = result["feature_names_eff"]
-
+    # 4) training_metadata.json + feature_schema.json — Models card + Spec.
+    nwp_models = [m for m, _ in MODELS_LEAN]
     metadata = {
-        "Version":     version,
-        "Target":      "precipitation",
-        "Phase":       PHASE,
-        "DataSource":  "open_meteo_previous_runs+ea_rainfall+dbarts_bart_lead_as_feature",
+        "Version":      version,
+        "Target":       "precipitation",
+        "Phase":        PHASE,
+        "DataSource":   "open_meteo_previous_runs+ea_rainfall+dbarts_bart_per_cell",
         "TrainedAtUtc": datetime.now(timezone.utc).isoformat(),
         "Hyperparameters": {
-            "library":   "dbarts (R) via rpy2",
-            "ntree":     NTREE,
-            "k":         K,
-            "nskip":     NSKIP,
-            "ndpost":    NDPOST,
-            "seed":      SEED,
-            "objective": "binary (probit-link BART)",
-            "leadAsFeature": True,
+            "library":           "dbarts (R) via rpy2",
+            "ntree":             NTREE,
+            "k":                 K,
+            "nskip":             NSKIP,
+            "ndpost":            NDPOST,
+            "seed":              SEED,
+            "objective":         "binary (probit-link BART)",
+            "leadAsFeature":     False,
             "trainPredictSplit": True,
+            "perCell":           True,
         },
         "DeviationsFromBrief": [
-            "BART (Bayesian Additive Regression Trees) via R dbarts package, "
-            "called from Python via rpy2.",
-            "Train and predict are now separate processes — train_4a.py emits "
-            "a saved state.rds (storeState + saveRDS) and predict_4a.py loads "
-            "it via a warm scaffold + setState on each 6-hourly cycle.",
-            "Lead pooled across all six leads via a `lead` feature column "
-            "(Phase 5 pattern); one BART per station instead of per (station, "
-            "lead).",
-            "22-feature 3a base + 3 synoptic flow features (wind_dir_sin_mean, "
-            "wind_dir_cos_mean, surface_pressure_mean).",
+            "Per-cell BART: one fit per (station, lead). Matches 3a's per-cell "
+            "architecture; deployed as a challenger alongside 3a (3a stays Current).",
+            "5 leads: {24, 48, 72, 96, 120}. Original 9-cell research used "
+            "{24, 48, 72} only; extending here as per the deployment plan.",
+            "PerLeadStats fields repurposed: BlendTestMae=BART Brier, "
+            "BlendTestRmse=climatology Brier (NOT MAE/RMSE — site reuses fields).",
         ],
-        "PerLead": {str(d["LeadHours"]): {
-            **d,
-            "DataRangeTrain": (
-                f"{train_df['ValidTimeUtc'].min()} → {train_df['ValidTimeUtc'].max()}"
-                if len(train_df) else ""),
-            "DataRangeVal":   (
-                f"{val_df['ValidTimeUtc'].min()} → {val_df['ValidTimeUtc'].max()}"
-                if len(val_df) else ""),
-            "DataRangeTest":  (
-                f"{test_df['ValidTimeUtc'].min()} → {test_df['ValidTimeUtc'].max()}"
-                if len(test_df) else ""),
-            "TestCalendarMonths": 4,
-        } for d in per_lead if d["LeadHours"] > 0},
+        "PerLead": {
+            str(d["LeadHours"]): d for d in result["per_lead_stats"]
+        },
     }
-
-    nwp_models = [m for m, _ in MODELS_LEAN]
     schema_per_lead = {
         str(L): {
-            "Target": "precipitation",
-            "FeatureSet": f"phase4a-bart-l{L:02}",
-            "LeadHours":  L,
+            "Target":         "precipitation",
+            "FeatureSet":     f"phase4a-percell-l{L:02}",
+            "LeadHours":      L,
             "RequiredModels": [],
             "OptionalModels": nwp_models,
             "Models":         nwp_models,
-            "FeatureNames":   feature_names_eff,
+            "FeatureNames":   result["per_cell"][L]["feature_names_eff"],
             "DataSource":     "open_meteo_previous_runs",
-            "Tier":           "4a-bart",
+            "Tier":           "4a-percell",
             "UkvStrategy":    None,
-        } for L in LEADS
+        }
+        for L in LEADS if L in result["per_cell"]
     }
-    schema = {"Leads": schema_per_lead}
-
     metadata = _json_sanitize_nans(metadata)
     (out_dir / "training_metadata.json").write_text(
         json.dumps(metadata, indent=2, default=str, allow_nan=False))
     (out_dir / "feature_schema.json").write_text(
-        json.dumps(schema, indent=2, allow_nan=False))
+        json.dumps({"Leads": schema_per_lead}, indent=2, allow_nan=False))
 
-    # 5) test_predictions.parquet — per-row held-out probabilities for
-    # downstream bake-offs (e.g. 3a+4a linear pool). Same column
-    # conventions as 5a's test_predictions.parquet so a single bake-off
-    # script can inner-join across phases. lead is the per-row lead
-    # value (lead-as-feature 4a pools all leads in one fit, so each test
-    # row already carries its own lead value).
-    p_test = result["p_test"]
-    y_test = result["y_test"]
-    test_pred_df = pd.DataFrame({
-        "valid_time": pd.to_datetime(test_df["ValidTimeUtc"].values),
-        "station":    station_slug,
-        "lead":       test_df["lead"].astype(int).values,
-        "p_wet":      p_test,
-        "observed_wet": y_test.astype("int8"),
-    })
-    test_pred_df.to_parquet(out_dir / "test_predictions.parquet", index=False)
+    # 5) test_predictions.parquet — aggregated across 5 leads.
+    if not result["test_predictions"].empty:
+        result["test_predictions"].to_parquet(out_dir / "test_predictions.parquet", index=False)
 
     sizes = {p.name: p.stat().st_size for p in out_dir.iterdir() if p.is_file()}
     print(f"  bundle → {out_dir}")
     for name, size in sorted(sizes.items()):
-        print(f"    {name:25s} {size:>10,} bytes")
+        print(f"    {name:30s} {size:>10,} bytes")
 
 
 def _json_sanitize_nans(obj):
-    """Replace non-finite floats (NaN, ±inf) with 0.0 for strict-JSON
-    consumers — the WeatherBlend C# renderer's System.Text.Json rejects
-    literal NaN/Infinity tokens and silently drops the model summary.
-    See ModelArtifact.cs convention.
-    """
-    import math
     if isinstance(obj, dict):
         return {k: _json_sanitize_nans(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
+    if isinstance(obj, list):
         return [_json_sanitize_nans(v) for v in obj]
-    if isinstance(obj, float) and not math.isfinite(obj):
-        return 0.0
-    if hasattr(obj, "__float__"):
-        try:
-            f = float(obj)
-        except (TypeError, ValueError):
-            return obj
-        if not math.isfinite(f):
-            return 0.0
+    if isinstance(obj, float) and (np.isnan(obj) or np.isinf(obj)):
+        return None
     return obj
 
 
 def main() -> None:
-    p = argparse.ArgumentParser()
+    p = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
     p.add_argument("--anchor", default=None,
-                   help="Anchor date YYYY-MM-DD UTC for the version string only.")
+                   help="Anchor date YYYY-MM-DD UTC for the version string. Default: today.")
     p.add_argument("--stations", nargs="*", default=None,
                    help="Station subset (default: all 3 active).")
     p.add_argument("--models-root", default=str(WEATHERBLEND_DATA_ROOT / "models"),
@@ -428,37 +399,35 @@ def main() -> None:
     models_root = Path(args.models_root)
     version = datetime.now(timezone.utc).strftime("v%Y-%m-%d_%H%M%S_phase4a")
 
-    print(f"[{time.strftime('%H:%M:%S')}] Phase 4a TRAIN (split from predict, state-persisting)")
-    print(f"  anchor:  {anchor.isoformat()}")
-    print(f"  version: {version}")
+    print(f"[{time.strftime('%H:%M:%S')}] Phase 4a per-cell TRAIN")
+    print(f"  anchor:   {anchor.isoformat()}")
+    print(f"  version:  {version}")
     print(f"  stations: {stations}")
-    print(f"  leads (pooled feature): {LEADS}")
+    print(f"  leads:    {LEADS}")
+    print(f"  fits:     {len(stations)} stations × {len(LEADS)} leads = {len(stations)*len(LEADS)} BART fits total")
 
-    # RetrainGuard wired in 2026-05-10 (Phase 1c of AUTO_RETRAIN_PLAN.md
-    # — Python side). Each station guards independently against the
-    # latest 4a version under that station's models dir; if the guard
-    # fires, that station's bundle is skipped (no write_bundle, no
-    # state.rds, no metadata) and the loop continues with the others.
-    # If any station fails, exit 4 at the end so the [ci-fail]
-    # retrain-python issue fires.
     import logging as _logging
     _logging.basicConfig(level=_logging.INFO, format="%(message)s")
-    log = _logging.getLogger("train_4a")
+    log = _logging.getLogger("train_4a_per_cell")
 
     bundles_written = 0
     guard_failures = 0
     for station_input in stations:
         station_slug, station_friendly = resolve_station(station_input)
-        print(f"\n[{time.strftime('%H:%M:%S')}] {station_friendly}")
-        result = train_one_station(station_friendly)
+        print(f"\n[{time.strftime('%H:%M:%S')}] {station_friendly} — {len(LEADS)} per-cell fits")
+        result = train_one_station(station_friendly, station_slug)
+
         bundle_dir = models_root / "precipitation" / station_slug / version
         bundle_dir.mkdir(parents=True, exist_ok=True)
 
-        # Guard BEFORE the heavy bundle write. Inputs are the SCALED
-        # train arrays (the warm-scaffold path the predict side uses, so
-        # NaN / mean / std stats reflect what the model actually fit on).
-        # On pass the guard writes training_summary.json into bundle_dir;
-        # write_bundle() runs after and adds the rest of the artefacts.
+        # RetrainGuard against the previous 4a (or first-ever if no
+        # prior). Phase tag `4a` — old lead-pooled bundles also used
+        # this tag; try_load_previous_summary will pick up whichever
+        # is latest. That's fine: even if the previous run was lead-
+        # pooled with different feature stats, the guard's NaN-pct +
+        # label-rate + row-count bands are robust to architectural
+        # shifts, and the first per-cell retrain inherits the lead-
+        # pooled summary as its baseline (acceptable seed).
         y_train = result["y_train"]
         guard_result = build_check_and_save_versioned(
             log,
@@ -466,34 +435,37 @@ def main() -> None:
             composite=f"precipitation/{station_slug}",
             phase=PHASE,
             version=version,
-            rows_train=len(result["train_df"]),
-            rows_val=len(result["val_df"]),
-            rows_test=len(result["test_df"]),
-            train_features=result["X_train_s"],
-            feature_names=result["feature_names_eff"],
+            rows_train=len(result["train_features"]),
+            rows_val=0,
+            rows_test=int(result["test_predictions"].shape[0] // len(LEADS)) if len(result["test_predictions"]) else 0,
+            train_features=result["train_features"],
+            feature_names=result["feature_names"],
             label_rates={station_slug: float(np.mean(y_train))} if len(y_train) else {},
         )
         if not guard_result.passed:
-            print(
-                f"  guard FAIL — skipping bundle for {station_slug}; previous version stays current."
-            )
+            print(f"  guard FAIL — skipping bundle for {station_slug}.")
             guard_failures += 1
-            ro.r('rm(fit, state_only); gc()')
+            # Free R-side state before next station so peak RAM is bounded.
+            for lead in LEADS:
+                ro.r(f'rm(fit_lead_{lead}h)')
+            ro.r('gc()')
             continue
 
-        write_bundle(bundle_dir, station_slug, station_friendly, version, result, anchor)
+        write_per_cell_bundle(bundle_dir, station_slug, station_friendly, version, result, anchor)
         bundles_written += 1
-        # Free the R-side fit before the next station so peak RAM stays bounded.
-        ro.r('rm(fit, state_only); gc()')
+
+        # Free R-side fits before the next station — peak RAM scales
+        # linearly otherwise (5 BARTs × 14k rows × keeptrees=TRUE).
+        for lead in LEADS:
+            ro.r(f'rm(fit_lead_{lead}h)')
+        ro.r('rm(state_only); gc()')
 
     print()
-    print(f"Phase 4a train complete. Bundles written: {bundles_written} (guard failures: {guard_failures})")
+    print(f"Phase 4a per-cell train complete. Bundles written: {bundles_written} "
+          f"(guard failures: {guard_failures})")
     if bundles_written == 0:
         sys.exit(1)
     if guard_failures > 0:
-        # Some stations succeeded; non-zero exit so the workflow webhook
-        # opens a [ci-fail] issue listing the failed cells. Successful
-        # stations remain promoted (they wrote bundles).
         sys.exit(4)
 
 
