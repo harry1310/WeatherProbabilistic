@@ -411,14 +411,13 @@ jobs:
       # so a guard-fail / push-fail run still leaves the trained bundle
       # downloadable from the workflow page for manual triage.
 
-      - name: Upload 4a artefacts (fallback)
-        if: always() && steps.phases.outputs.run_4a == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: retrain-4a-${{ github.run_id }}
-          path: ../WeatherBlend/data/models/precipitation/**/*phase4a*/**
-          retention-days: 14
-          if-no-files-found: warn
+      # 4a fallback artefact upload removed 2026-05-11. The bundle dir
+      # lives at ../WeatherBlend/data/... which sits OUTSIDE the
+      # workflow's checkout, and actions/upload-artifact@v4 rejects
+      # paths containing `..` ("Relative pathing not allowed"). R2 push
+      # above is the production path; if it fails the run logs are
+      # enough to triage. Restoring this fallback would need a `cp -r`
+      # to a staging dir inside the workspace first — not worth it.
 
       - name: Upload 5a artefacts (fallback)
         if: always() && steps.phases.outputs.run_5a == 'true'

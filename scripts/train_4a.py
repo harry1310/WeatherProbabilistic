@@ -92,7 +92,15 @@ from _shared import (  # noqa: E402
     resolve_station,
     time_split,
 )
-from run_phase6_bart_bakeoff import brier  # noqa: E402
+
+
+def brier(p: np.ndarray, y: np.ndarray) -> float:
+    """Mean squared error of probabilistic forecast vs binary truth.
+    Inlined here so train_4a.py doesn't transitively import the
+    bake-off module (which pulls in lightgbm — only in
+    requirements-bakeoff.txt, not the production CI install)."""
+    return float(np.mean((np.asarray(p, dtype=np.float64) -
+                          np.asarray(y, dtype=np.float64)) ** 2))
 
 _RCONVERT = default_converter + numpy2ri.converter + pandas2ri.converter
 ro.r(f'.libPaths(c("{_user_lib.replace(os.sep, "/")}", .libPaths()))')
