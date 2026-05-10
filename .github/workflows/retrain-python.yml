@@ -27,6 +27,15 @@ name: retrain-python
 #   - all:     ~3.5 hours
 
 on:
+  # Automated path (Sunday): WeatherBlend's previous-runs-refresh fires
+  # this on its own success when the Cloudflare worker passes it
+  # train_after_refresh=true (the worker only sets that on Sundays).
+  # client_payload carries phases + add_spread_features so the same
+  # payload shape works for manual-dispatch overrides.
+  repository_dispatch:
+    types: [retrain]
+  # Manual path: user fires from CLI / Actions UI. force=true (default)
+  # bypasses any gate.
   workflow_dispatch:
     inputs:
       phases:
@@ -39,7 +48,7 @@ on:
         required: false
         type: string
       force:
-        description: "Run even on a non-Sunday (manual override). Default true since this slice is manual-only."
+        description: "Run regardless of trigger source (manual override). Default true."
         required: false
         default: true
         type: boolean
@@ -76,29 +85,46 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Decide whether to proceed (day-of-week + force gate)
+      - name: Decide whether to proceed
+        # Gate kept simple now that Cloudflare owns the cadence rule. Three
+        # ways this workflow fires; each unambiguously decides:
+        #   - repository_dispatch: WB previous-runs-refresh fired us after
+        #     a successful Sunday refresh. Cloudflare already gated the
+        #     Sunday check at dispatch time. Proceed.
+        #   - workflow_dispatch + force=true (default): manual run, user
+        #     intent to retrain regardless. Proceed.
+        #   - workflow_dispatch + force=false: rare opt-out, e.g. testing
+        #     the workflow's wiring without the 3-hour sample. Skip.
         id: gate
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force }}" = "true" ]; then
+          EVENT="${{ github.event_name }}"
+          if [ "$EVENT" = "repository_dispatch" ]; then
+            echo "Triggered via repository_dispatch (Sunday auto-trigger from WB previous-runs-refresh) — proceeding."
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT" = "workflow_dispatch" ] && [ "${{ inputs.force }}" = "true" ]; then
             echo "Manual dispatch with force=true — proceeding."
             echo "proceed=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          DOW=$(date -u +%u)   # ISO: 1=Mon … 7=Sun
-          if [ "$DOW" = "7" ]; then
-            echo "Sunday UTC — proceeding."
-            echo "proceed=true" >> "$GITHUB_OUTPUT"
           else
-            echo "::notice::Not Sunday (DOW=$DOW) and force=false — skipping retrain (workflow exits cleanly so the webhook handler doesn't open a [ci-fail] issue)."
+            echo "::notice::workflow_dispatch with force=false — exiting cleanly (no training)."
             echo "proceed=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Decide which phases to run
+        # Phase config can come from either trigger:
+        #   - workflow_dispatch: inputs.phases (default "all")
+        #   - repository_dispatch: client_payload.phases (default "all")
+        # Same parsing for both.
         id: phases
         if: steps.gate.outputs.proceed == 'true'
+        env:
+          PHASES_DISPATCH: ${{ inputs.phases }}
+          PHASES_PAYLOAD: ${{ github.event.client_payload.phases }}
         run: |
-          INPUT="${{ inputs.phases }}"
-          INPUT="${INPUT:-all}"
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            INPUT="${PHASES_PAYLOAD:-all}"
+          else
+            INPUT="${PHASES_DISPATCH:-all}"
+          fi
           if [ "$INPUT" = "all" ]; then INPUT="4a,5a"; fi
           run_4a=false; run_5a=false
           case ",$INPUT," in
@@ -114,6 +140,25 @@ jobs:
             echo "::error::No recognised phases in input '$INPUT'. Expected 4a, 5a, or 'all'."
             exit 1
           fi
+
+      - name: Decide spread-features flag
+        # add_spread_features: only honoured for 5a. Same source priority
+        # as phases — payload first (Sunday auto path), input second
+        # (manual path). Default false until the spread-features model
+        # is promoted to production.
+        id: spread
+        if: steps.gate.outputs.proceed == 'true'
+        env:
+          SPREAD_DISPATCH: ${{ inputs.add_spread_features }}
+          SPREAD_PAYLOAD: ${{ github.event.client_payload.add_spread_features }}
+        run: |
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            FLAG="${SPREAD_PAYLOAD:-false}"
+          else
+            FLAG="${SPREAD_DISPATCH:-false}"
+          fi
+          echo "add_spread_features=$FLAG"
+          echo "flag=$FLAG" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-python@v5
         if: steps.gate.outputs.proceed == 'true'
@@ -225,7 +270,7 @@ jobs:
           # predictions parquet. extend_5a depends on the freshly-written
           # posterior NetCDF from run_phase5_bayesian.
           ARGS=""
-          if [ "${{ inputs.add_spread_features }}" = "true" ]; then
+          if [ "${{ steps.spread.outputs.flag }}" = "true" ]; then
             ARGS="--add-spread-features"
             echo "::notice::Running 5a in 10-feature spread-features mode."
           fi
