@@ -1,0 +1,277 @@
+name: retrain-python
+
+# Phase 2 of AUTO_RETRAIN_PLAN.md (slice 1) — manual-dispatch retrain
+# of WeatherProbabilistic Python phases (4a BART, 5a Bayesian logreg)
+# with per-phase configurability.
+#
+# Slice 1 scope:
+#   - workflow_dispatch trigger only (no auto-firing yet — workflow_run
+#     across repos needs repository_dispatch wiring; that's slice 3).
+#   - `phases` input lets the user pick which phases to retrain. "all"
+#     runs both; "5a" or "4a" runs just one. Useful for the user's
+#     overnight 5a test that motivated this slice.
+#   - Day-of-week + force gate for future Sunday-cron triggering — even
+#     though slice 1 is manual-only, the gate is wired so the workflow
+#     is ready for slice 3's automatic trigger.
+#   - JAX device count assertion for the 5a path (catches the
+#     XLA_FLAGS=--xla_force_host_platform_device_count=4 setup not
+#     taking effect in CI; production phase5 took 246 min on the
+#     1-device fallback before we discovered this).
+#   - Artefacts uploaded as workflow artifacts for manual inspection.
+#     R2 push + commit-back come in slice 2 once the user's tested
+#     the basic flow.
+#
+# Cost ballpark on ubuntu-latest (4 vCPU):
+#   - 4a only: ~25 min (3 stations sequentially)
+#   - 5a only: ~3 hours (4 chains × 2000+2000 iters, pmap'd 4 devices)
+#   - all:     ~3.5 hours
+
+on:
+  workflow_dispatch:
+    inputs:
+      phases:
+        description: "Comma-separated phases to retrain. 'all' = 4a,5a. Examples: '5a', '4a', '4a,5a'."
+        required: false
+        default: "all"
+        type: string
+      anchor:
+        description: "Anchor date YYYY-MM-DD UTC for the version string. Empty = today."
+        required: false
+        type: string
+      force:
+        description: "Run even on a non-Sunday (manual override). Default true since this slice is manual-only."
+        required: false
+        default: true
+        type: boolean
+      add_spread_features:
+        description: "5a only — include precip_max + precip_agreement_wet_01 in the feature set (pilot-validated 2026-05-10; drops dry-tail floor materially). Off by default."
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  # Distinct from weatherprobabilistic-train-4a (the existing 4a-only
+  # workflow's group) so the two workflows don't queue against each
+  # other — the 4a-only workflow stays available for one-off targeted
+  # retrains while this one drives the full Sunday sweep.
+  group: weatherprobabilistic-retrain-${{ inputs.phases }}
+  cancel-in-progress: false
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    # 6h ceiling for the full sweep. 5a alone ≈ 3h on 4 vCPU; +25 min
+    # for 4a; +30 min slack for setup, R install, R2 sync, artifact
+    # upload. Job-level timeout fires before GitHub's default 360 min
+    # in case anything stalls.
+    timeout-minutes: 360
+    # Belt-and-braces XLA_FLAGS for blackjax chain pmap'ing across 4
+    # virtual CPU devices. phase2_partial_pooling.py also sets this at
+    # module-import time via os.environ.setdefault, but setting it at
+    # the job level guarantees the env-var is in place even if the
+    # module setdefault gets removed in some future refactor. JAX reads
+    # this once at backend init; no runtime cost.
+    env:
+      XLA_FLAGS: "--xla_force_host_platform_device_count=4"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Decide whether to proceed (day-of-week + force gate)
+        id: gate
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force }}" = "true" ]; then
+            echo "Manual dispatch with force=true — proceeding."
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          DOW=$(date -u +%u)   # ISO: 1=Mon … 7=Sun
+          if [ "$DOW" = "7" ]; then
+            echo "Sunday UTC — proceeding."
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Not Sunday (DOW=$DOW) and force=false — skipping retrain (workflow exits cleanly so the webhook handler doesn't open a [ci-fail] issue)."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Decide which phases to run
+        id: phases
+        if: steps.gate.outputs.proceed == 'true'
+        run: |
+          INPUT="${{ inputs.phases }}"
+          INPUT="${INPUT:-all}"
+          if [ "$INPUT" = "all" ]; then INPUT="4a,5a"; fi
+          run_4a=false; run_5a=false
+          case ",$INPUT," in
+            *,4a,*) run_4a=true ;;
+          esac
+          case ",$INPUT," in
+            *,5a,*) run_5a=true ;;
+          esac
+          echo "Selected phases: $INPUT (run_4a=$run_4a, run_5a=$run_5a)"
+          echo "run_4a=$run_4a" >> "$GITHUB_OUTPUT"
+          echo "run_5a=$run_5a" >> "$GITHUB_OUTPUT"
+          if [ "$run_4a" = "false" ] && [ "$run_5a" = "false" ]; then
+            echo "::error::No recognised phases in input '$INPUT'. Expected 4a, 5a, or 'all'."
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        if: steps.gate.outputs.proceed == 'true'
+        with:
+          python-version: "3.12"
+
+      # R + dbarts only needed for 4a — install conditionally so 5a-only
+      # runs save the ~3 min apt + R-package install. 4a's existing
+      # train-4a.yml has the same install; copying verbatim keeps the
+      # two workflows in sync until we factor a shared composite action.
+      - name: Install R + dbarts (4a only)
+        if: steps.gate.outputs.proceed == 'true' && steps.phases.outputs.run_4a == 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends r-base r-base-dev libtirpc-dev python3-dev
+          R --version
+          mkdir -p ~/R/x86_64-pc-linux-gnu-library/4.4
+          echo 'R_LIBS_USER=~/R/x86_64-pc-linux-gnu-library/4.4' >> ~/.Renviron
+          R -e 'install.packages("dbarts", repos="https://cloud.r-project.org", lib=Sys.getenv("R_LIBS_USER"))'
+          R -e 'library(dbarts); cat("dbarts version:", as.character(packageVersion("dbarts")), "\n")'
+
+      - name: Install Python deps
+        if: steps.gate.outputs.proceed == 'true'
+        env:
+          RPY2_CFFI_MODE: ABI
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          if [ "${{ steps.phases.outputs.run_4a }}" = "true" ]; then
+            # rpy2<3.6 because rpy2 3.6+ references R_getVar (R 4.5+)
+            # which Ubuntu 24.04's r-base 4.4 doesn't expose.
+            pip install 'rpy2<3.6'
+          fi
+
+      - name: Verify JAX device count (5a only)
+        # Fast-fail BEFORE the 3-hour sample call if the env-var didn't
+        # take effect — without 4 devices the chain pmap silently falls
+        # back to sequential and we'd burn the runner for ~12h instead.
+        if: steps.gate.outputs.proceed == 'true' && steps.phases.outputs.run_5a == 'true'
+        run: |
+          python -c "
+          import jax
+          ds = jax.devices()
+          print(f'JAX devices: {ds}')
+          assert len(ds) == 4, f'Expected 4 CpuDevices for chain pmap parallelism, got {len(ds)}. XLA_FLAGS at job level should make JAX virtualise 4 devices on the 4-vCPU runner.'
+          "
+
+      - name: Install rclone
+        if: steps.gate.outputs.proceed == 'true'
+        run: |
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+          rclone version
+
+      - name: Configure rclone for R2
+        if: steps.gate.outputs.proceed == 'true'
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+        run: |
+          mkdir -p ~/.config/rclone
+          cat > ~/.config/rclone/rclone.conf <<EOF
+          [r2]
+          type = s3
+          provider = Cloudflare
+          access_key_id = ${R2_ACCESS_KEY_ID}
+          secret_access_key = ${R2_SECRET_ACCESS_KEY}
+          endpoint = ${R2_ENDPOINT}
+          acl = private
+          EOF
+
+      - name: Pull data trees from R2
+        # Both 4a and 5a need the forecast tree + EA truth. Pull once,
+        # let each phase consume what it needs.
+        if: steps.gate.outputs.proceed == 'true'
+        env:
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          mkdir -p ../WeatherBlend/data/forecasts/location=bonehill_rocks
+          for m in gfs_seamless ecmwf_ifs025 icon_seamless meteofrance_seamless gem_seamless ecmwf_aifs025_single jma_seamless; do
+            rclone copy "r2:${R2_BUCKET}/data/forecasts/location=bonehill_rocks/model=$m" \
+              "../WeatherBlend/data/forecasts/location=bonehill_rocks/model=$m" \
+              --fast-list --transfers 16 --checkers 32
+          done
+          mkdir -p ../WeatherBlend/data/truth/rainfall
+          rclone copy "r2:${R2_BUCKET}/data/truth/rainfall" \
+            ../WeatherBlend/data/truth/rainfall \
+            --fast-list --transfers 16 --checkers 32
+
+      - name: Train 4a (BART)
+        if: steps.gate.outputs.proceed == 'true' && steps.phases.outputs.run_4a == 'true'
+        env:
+          WEATHERBLEND_DATA_ROOT: ${{ github.workspace }}/../WeatherBlend/data
+          R_HOME: /usr/lib/R
+          R_LIBS_USER: /home/runner/R/x86_64-pc-linux-gnu-library/4.4
+          RPY2_CFFI_MODE: ABI
+        run: |
+          ANCHOR="${{ inputs.anchor }}"
+          ARGS=""
+          if [ -n "$ANCHOR" ]; then ARGS="--anchor $ANCHOR"; fi
+          python -u scripts/train_4a.py $ARGS
+
+      - name: Train 5a (Bayesian logreg)
+        if: steps.gate.outputs.proceed == 'true' && steps.phases.outputs.run_5a == 'true'
+        env:
+          WEATHERBLEND_DATA_ROOT: ${{ github.workspace }}/../WeatherBlend/data
+        run: |
+          # Two-step: sample posterior, then build live bundle + test
+          # predictions parquet. extend_5a depends on the freshly-written
+          # posterior NetCDF from run_phase5_bayesian.
+          ARGS=""
+          if [ "${{ inputs.add_spread_features }}" = "true" ]; then
+            ARGS="--add-spread-features"
+            echo "::notice::Running 5a in 10-feature spread-features mode."
+          fi
+          # extend_5a builds the live_bundle StandardScaler from the
+          # SAME prepare_phase3_dataset call shape as the trainer — pass
+          # the same flag so the scaler matches the posterior's feature
+          # set. Mismatched flags here = predict_5a feeds wrong-shaped
+          # X to the posterior and silently mis-scores every row.
+          python -u scripts/run_phase5_bayesian.py $ARGS
+          python -u scripts/extend_5a.py $ARGS
+
+      # ----- Slice 1: artefacts uploaded for inspection only --------------
+      # Slice 2 will replace these with R2 push (4a) + commit-back to main
+      # (5a, since predict-5a.yml reads its posterior from the checked-out
+      # repo). Keeping it as workflow artifacts for slice 1 means the user
+      # can vet the overnight test output before automating the side
+      # effects.
+
+      - name: Upload 4a artefacts (for inspection)
+        if: always() && steps.phases.outputs.run_4a == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: retrain-4a-${{ github.run_id }}
+          path: ../WeatherBlend/data/models/precipitation/**/*phase4a*/**
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Upload 5a artefacts (for inspection)
+        if: always() && steps.phases.outputs.run_5a == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: retrain-5a-${{ github.run_id }}
+          path: |
+            reports/phase5a_artefacts/posteriors/lead_feature.nc
+            reports/phase5a_artefacts/live_bundle/
+            reports/phase5a_artefacts/predictions/test_predictions_with_ci.parquet
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Upload run logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: retrain-python-logs-${{ github.run_id }}
+          path: |
+            *.log
+            reports/*.log
+          retention-days: 7
+          if-no-files-found: ignore
