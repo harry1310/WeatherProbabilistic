@@ -238,6 +238,12 @@ def train_one_station(station_friendly: str) -> dict:
         "scaler_scale": scaler.scale_,
         "X_train_s":  X_train_s,
         "y_train":    y_train,
+        # Per-row test predictions for downstream bake-offs (e.g. 3a+4a
+        # linear pool). Same shape and column conventions as 5a's
+        # test_predictions.parquet so a single bake-off script can
+        # consume both. y_test cast to int8 to match.
+        "p_test":     p_test,
+        "y_test":     y_test,
     }
 
 
@@ -355,6 +361,23 @@ def write_bundle(out_dir: Path, station_slug: str, station_friendly: str,
         json.dumps(metadata, indent=2, default=str, allow_nan=False))
     (out_dir / "feature_schema.json").write_text(
         json.dumps(schema, indent=2, allow_nan=False))
+
+    # 5) test_predictions.parquet — per-row held-out probabilities for
+    # downstream bake-offs (e.g. 3a+4a linear pool). Same column
+    # conventions as 5a's test_predictions.parquet so a single bake-off
+    # script can inner-join across phases. lead is the per-row lead
+    # value (lead-as-feature 4a pools all leads in one fit, so each test
+    # row already carries its own lead value).
+    p_test = result["p_test"]
+    y_test = result["y_test"]
+    test_pred_df = pd.DataFrame({
+        "valid_time": pd.to_datetime(test_df["ValidTimeUtc"].values),
+        "station":    station_slug,
+        "lead":       test_df["lead"].astype(int).values,
+        "p_wet":      p_test,
+        "observed_wet": y_test.astype("int8"),
+    })
+    test_pred_df.to_parquet(out_dir / "test_predictions.parquet", index=False)
 
     sizes = {p.name: p.stat().st_size for p in out_dir.iterdir() if p.is_file()}
     print(f"  bundle → {out_dir}")
