@@ -76,13 +76,29 @@ RANDOM_SEED = 42
 
 
 def main() -> None:
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument(
+        "--add-spread-features",
+        action="store_true",
+        help=("Include precip_max + precip_agreement_wet_01 in the feature "
+              "set (10-feature variant). Pilot-validated 2026-05-10 to drop "
+              "the dry-tail floor materially vs the 8-feature default. Off "
+              "by default until promoted to production."),
+    )
+    args = p.parse_args()
+
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     POSTERIOR_DIR.mkdir(parents=True, exist_ok=True)
     PREDICTIONS_DIR.mkdir(parents=True, exist_ok=True)
 
-    print(f"[{time.strftime('%H:%M:%S')}] Phase 5 Bayesian — lead-as-feature, 5-model variant")
+    variant = "10-feat (spread)" if args.add_spread_features else "8-feat"
+    print(f"[{time.strftime('%H:%M:%S')}] Phase 5 Bayesian — lead-as-feature, "
+          f"5-model variant, {variant}")
     ds = prepare_phase3_dataset(
-        models=MODELS_NO_UKMO, lead_as_feature=True, verbose=False,
+        models=MODELS_NO_UKMO, lead_as_feature=True,
+        add_spread_features=args.add_spread_features,
+        verbose=False,
     )
     print(f"  train rows: {len(ds.X_train):,}  test rows: {len(ds.X_test):,}")
     print(f"  features ({len(ds.feature_names)}): {ds.feature_names}")

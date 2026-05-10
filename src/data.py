@@ -584,6 +584,7 @@ def prepare_phase3_dataset(
     verbose: bool = True,
     models: tuple[str, ...] = MODELS,
     lead_as_feature: bool = False,
+    add_spread_features: bool = False,
 ) -> Phase3Dataset:
     """Three-station × multi-lead loader for Phase 3.
 
@@ -606,6 +607,23 @@ def prepare_phase3_dataset(
     """
     forecasts, precip_cols = _load_all_forecasts_multi_lead(leads, verbose=verbose, models=models)
 
+    # Optional spread features mirroring 3a/4a's non-linear inputs:
+    # precip_max captures "at least one NWP says wet", precip_agreement_wet_01
+    # captures "what fraction of NWPs cross the 0.1 mm/h threshold". A linear
+    # logistic regression can't represent these AND-conditions across raw
+    # precip inputs, so adding them as pre-computed scalars lets 5a's LR
+    # reach the dry tail (P(wet) → ~0 when all NWPs are at zero) the way
+    # tree-based 3a/4a do. Computed on the inner-joined forecast rows so
+    # every station sees the same spread features per (valid_time, lead).
+    if add_spread_features:
+        pm_arr = forecasts[precip_cols].to_numpy(dtype="float64")
+        forecasts["precip_max"] = np.nanmax(pm_arr, axis=1)
+        present = (~np.isnan(pm_arr)).sum(axis=1)
+        wet_count = (pm_arr >= WET_THRESHOLD_MM).sum(axis=1)  # NaN compares False so OK
+        forecasts["precip_agreement_wet_01"] = np.where(
+            present > 0, wet_count / np.maximum(present, 1), np.nan
+        )
+
     train_frames: list[pd.DataFrame] = []
     test_frames: list[pd.DataFrame] = []
     station_codes = [code for _, code in STATIONS]
@@ -623,6 +641,14 @@ def prepare_phase3_dataset(
 
         df = truth[["ValidTimeUtc", "observed_wet"]].merge(forecasts, on="ValidTimeUtc", how="inner")
         df, fn = _select_features(df, precip_cols, verbose=verbose, models=models)
+        if add_spread_features:
+            # Append after the per-NWP precip block, before the cyclical
+            # features and the optional `lead` column — keeps the column
+            # order aligned with 3a/4a (precip_<m> → spread → cyclical →
+            # lead) so a future cross-model feature-importance comparison
+            # can index the same way.
+            insert_at = len(precip_cols)
+            fn = list(fn[:insert_at]) + ["precip_max", "precip_agreement_wet_01"] + list(fn[insert_at:])
         if lead_as_feature:
             # Append a "lead" column to the feature set. Raw hours
             # (24/48/72) — the pooled StandardScaler below will turn it

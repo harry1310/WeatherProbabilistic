@@ -112,11 +112,27 @@ def load_fit_from_disk(feature_names: list[str], station_codes: list[str]) -> Pa
 
 
 def main() -> None:
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument(
+        "--add-spread-features",
+        action="store_true",
+        help=("Match the run_phase5_bayesian flag — must agree with the "
+              "trained posterior's feature set or the live bundle scaler "
+              "won't match the posterior's coefficient shape and predict_5a "
+              "will mis-score every row. Off by default."),
+    )
+    args = p.parse_args()
+
     PREDICTIONS_DIR.mkdir(parents=True, exist_ok=True)
 
-    print(f"[{time.strftime('%H:%M:%S')}] Loading Phase 3 dataset (5-model, lead-as-feature)")
+    variant = "10-feat (spread)" if args.add_spread_features else "8-feat"
+    print(f"[{time.strftime('%H:%M:%S')}] Loading Phase 3 dataset "
+          f"(5-model, lead-as-feature, {variant})")
     ds = prepare_phase3_dataset(
-        models=MODELS_NO_UKMO, lead_as_feature=True, verbose=False,
+        models=MODELS_NO_UKMO, lead_as_feature=True,
+        add_spread_features=args.add_spread_features,
+        verbose=False,
     )
     print(f"  test rows: {len(ds.X_test):,}  features: {len(ds.feature_names)}")
     save_live_bundle(ds)
