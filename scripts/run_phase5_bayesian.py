@@ -44,6 +44,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -61,6 +62,7 @@ sys.path.insert(0, str(ROOT))
 import arviz as az  # noqa: E402
 
 from src.data import MODELS_NO_UKMO, prepare_phase3_dataset  # noqa: E402
+from src.retrain_guard import build_check_and_save_singleton  # noqa: E402
 from src.models.phase2_partial_pooling import (  # noqa: E402
     fit_partial_pooling, predict_partial_pooling,
 )
@@ -105,6 +107,47 @@ def main() -> None:
     print(f"  stations: {ds.station_codes}")
     print(f"  leads: {ds.lead_hours}  (pooled into one fit; lead is feature index "
           f"{ds.feature_names.index('lead')})")
+
+    # RetrainGuard wired in 2026-05-10 (Phase 1c, Python side). Fires
+    # BEFORE the 3-hour MCMC sample so a stale upstream-data shift
+    # doesn't burn the runner. 5a is overwrite-style (one bundle, gets
+    # rewritten each run) so we use the singleton variant — the existing
+    # training_summary.json at OUT_DIR is the previous baseline; pass
+    # overwrites it, fail leaves it alone.
+    import logging as _logging
+    _logging.basicConfig(level=_logging.INFO, format="%(message)s")
+    _log = _logging.getLogger("phase5a")
+
+    # Per-station label rates from y_train + station_idx_train. Site
+    # convention is the EA-prefixed slug; use the station_codes labels
+    # verbatim (5a's station_codes are already the slugs).
+    label_rates = {}
+    y_train_arr = ds.y_train.values if hasattr(ds.y_train, "values") else np.asarray(ds.y_train)
+    station_idx_arr = np.asarray(ds.station_idx_train)
+    for i, code in enumerate(ds.station_codes):
+        mask = station_idx_arr == i
+        if mask.any():
+            label_rates[code] = float(y_train_arr[mask].mean())
+
+    version = datetime.now(timezone.utc).strftime("v%Y-%m-%d_%H%M%S_phase5a")
+    variant_tag = "10feat-spread" if args.add_spread_features else "8feat"
+
+    guard_result = build_check_and_save_singleton(
+        _log,
+        summary_path=OUT_DIR / "training_summary.json",
+        composite="precipitation_5a",
+        phase="5a",
+        version=f"{version}_{variant_tag}",
+        rows_train=len(ds.X_train),
+        rows_val=0,                      # 5a has no separate val slice; train+test only
+        rows_test=len(ds.X_test),
+        train_features=ds.X_train_s,
+        feature_names=list(ds.feature_names),
+        label_rates=label_rates,
+    )
+    if not guard_result.passed:
+        print("Phase 5a guard FAIL — skipping sample. Existing posterior + bundle stay live.")
+        sys.exit(4)
 
     print(f"\n[{time.strftime('%H:%M:%S')}] Fitting single partial-pool posterior across all leads")
     t0 = time.time()

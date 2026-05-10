@@ -75,6 +75,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from src.data import LOCATION, WEATHERBLEND_DATA_ROOT  # noqa: E402
+from src.retrain_guard import build_check_and_save_versioned  # noqa: E402
 
 from _shared import (  # noqa: E402
     FEATURE_NAMES,
@@ -410,21 +411,67 @@ def main() -> None:
     print(f"  stations: {stations}")
     print(f"  leads (pooled feature): {LEADS}")
 
+    # RetrainGuard wired in 2026-05-10 (Phase 1c of AUTO_RETRAIN_PLAN.md
+    # — Python side). Each station guards independently against the
+    # latest 4a version under that station's models dir; if the guard
+    # fires, that station's bundle is skipped (no write_bundle, no
+    # state.rds, no metadata) and the loop continues with the others.
+    # If any station fails, exit 4 at the end so the [ci-fail]
+    # retrain-python issue fires.
+    import logging as _logging
+    _logging.basicConfig(level=_logging.INFO, format="%(message)s")
+    log = _logging.getLogger("train_4a")
+
     bundles_written = 0
+    guard_failures = 0
     for station_input in stations:
         station_slug, station_friendly = resolve_station(station_input)
         print(f"\n[{time.strftime('%H:%M:%S')}] {station_friendly}")
         result = train_one_station(station_friendly)
         bundle_dir = models_root / "precipitation" / station_slug / version
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+
+        # Guard BEFORE the heavy bundle write. Inputs are the SCALED
+        # train arrays (the warm-scaffold path the predict side uses, so
+        # NaN / mean / std stats reflect what the model actually fit on).
+        # On pass the guard writes training_summary.json into bundle_dir;
+        # write_bundle() runs after and adds the rest of the artefacts.
+        y_train = result["y_train"]
+        guard_result = build_check_and_save_versioned(
+            log,
+            version_dir=bundle_dir,
+            composite=f"precipitation/{station_slug}",
+            phase=PHASE,
+            version=version,
+            rows_train=len(result["train_df"]),
+            rows_val=len(result["val_df"]),
+            rows_test=len(result["test_df"]),
+            train_features=result["X_train_s"],
+            feature_names=result["feature_names_eff"],
+            label_rates={station_slug: float(np.mean(y_train))} if len(y_train) else {},
+        )
+        if not guard_result.passed:
+            print(
+                f"  guard FAIL — skipping bundle for {station_slug}; previous version stays current."
+            )
+            guard_failures += 1
+            ro.r('rm(fit, state_only); gc()')
+            continue
+
         write_bundle(bundle_dir, station_slug, station_friendly, version, result, anchor)
         bundles_written += 1
         # Free the R-side fit before the next station so peak RAM stays bounded.
         ro.r('rm(fit, state_only); gc()')
 
     print()
-    print(f"Phase 4a train complete. Bundles written: {bundles_written}")
+    print(f"Phase 4a train complete. Bundles written: {bundles_written} (guard failures: {guard_failures})")
     if bundles_written == 0:
         sys.exit(1)
+    if guard_failures > 0:
+        # Some stations succeeded; non-zero exit so the workflow webhook
+        # opens a [ci-fail] issue listing the failed cells. Successful
+        # stations remain promoted (they wrote bundles).
+        sys.exit(4)
 
 
 if __name__ == "__main__":
