@@ -52,6 +52,22 @@ in hierarchical Bayesian modelling, almost always worth doing by default.
 from __future__ import annotations
 
 import os
+
+# Multi-device CPU for JAX/blackjax. MUST be set BEFORE jax is imported
+# (pm.sample with nuts_sampler="blackjax" is what triggers JAX init —
+# this module-import-time setup runs before that). On default settings
+# JAX exposes the entire host as one CpuDevice regardless of physical
+# core count, so chain_method="parallel" silently runs chains
+# sequentially via pmap on a 1-device fallback. With this flag, JAX
+# sees N virtual CPU devices and pmap actually parallelises chains
+# across cores. 4 = physical core count on the dev box (Intel i5-1035G4,
+# 4 cores / 8 logical); going past physical cores into hyperthreads
+# gives diminishing returns for matmul-heavy NUTS workloads.
+# Verified 2026-05-10: production phase5 took 246 min on 1-device
+# fallback; 4-device pmap should drop that to ~60-90 min for the same
+# fit. See reference_jax_cpu_multi_device_blackjax.md.
+os.environ.setdefault("XLA_FLAGS", "--xla_force_host_platform_device_count=4")
+
 import time
 from dataclasses import dataclass
 
@@ -83,6 +99,7 @@ def fit_partial_pooling(
     target_accept: float = 0.9,
     random_seed: int = 42,
     progressbar: bool = False,
+    chain_method: str = "parallel",
 ) -> PartialPoolingFit:
     coords = {
         "feature": feature_names,
@@ -152,22 +169,45 @@ def fit_partial_pooling(
         # Sampler: blackjax via JAX. Faster than native PyMC NUTS without
         # g++ (which falls back to Python and crawls), and faster than
         # nutpie on this Windows box where nutpie also lacks its native
-        # backend. Visibility comes from blackjax's own fastprogress bar
-        # — verified to emit text in non-TTY context once fastprogress +
-        # IPython are installed in the venv. PyMC's pm.sample callback
-        # is a native-NUTS-only feature; blackjax JIT-compiles the whole
-        # sampling loop so a Python callback can't fire. The progress
-        # bar is the supported alternative, and it does work.
-        # See memory/feedback_bayesian_training_must_log_progress.md.
+        # backend.
+        #
+        # chain_method="parallel" (default 2026-05-10): JAX pmap fans the
+        # chains out across N virtual CPU devices set up by the module-
+        # level XLA_FLAGS=--xla_force_host_platform_device_count=4 above.
+        # Production phase5 took 246 min on the prior 1-device fallback
+        # (chain_method="parallel" silently degraded to sequential because
+        # JAX defaults to one CpuDevice regardless of physical core count);
+        # with 4 virtual devices a 4-chain run should drop to ~60-90 min.
+        # "vectorized" (vmap on one device) was tried as a halfway fix
+        # — gave only ~12% speedup and fights with progressbar=True
+        # (NotImplementedError: IO effect not supported in vmap-of-cond).
+        #
+        # Progress visibility: blackjax JIT-compiles the entire sampling
+        # loop so no Python callback can fire mid-sample, and fastprogress
+        # bars only update at start/end (placeholder-noise during the JIT
+        # call). The Heartbeat below at 60s is the only real signal of
+        # liveness — see memory/feedback_bayesian_training_must_log_progress.md
+        # for the rule that motivated keeping it.
+        # blackjax's progressbar wires an IO effect into the JIT'd sampling
+        # loop. That's incompatible with chain_method="vectorized" (vmap-
+        # of-cond crashes with NotImplementedError) but works with
+        # chain_method="parallel" (pmap path). Either way the bar can only
+        # update at start/end (JIT swallows mid-sample updates), so the
+        # Heartbeat below at 60s is the real liveness signal — bar is
+        # decorative. See feedback_bayesian_training_must_log_progress.md
+        # for why we don't try harder on a Python callback (blackjax's
+        # JIT'd sampling loop won't yield to one).
+        bar = progressbar and chain_method != "vectorized"
         with Heartbeat(f"partial_pool n_obs={len(y_train)}", interval=60):
             idata = pm.sample(
                 draws=draws,
                 tune=tune,
                 chains=chains,
                 nuts_sampler="blackjax",
+                nuts_sampler_kwargs={"chain_method": chain_method},
                 random_seed=random_seed,
                 target_accept=target_accept,
-                progressbar=True,
+                progressbar=bar,
                 cores=1,
             )
         print(

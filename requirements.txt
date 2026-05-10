@@ -6,10 +6,19 @@ numpy>=1.26
 scikit-learn>=1.4
 scipy>=1.11
 matplotlib>=3.8
-# Rust-based NUTS sampler (used because g++ is not installed,
-# so PyTensor's C backend is unavailable). Requires numba at runtime.
+# NUTS samplers. Production phase 5a switched from nutpie to blackjax
+# 2026-05-10 (~30% faster on Windows, and the JAX backend lets us pmap
+# chains across multiple virtual CPU devices via XLA_FLAGS — see
+# reference_jax_cpu_multi_device_blackjax.md). nutpie + numba kept as
+# the documented fallback if the JAX backend ever fails to build.
 nutpie>=0.16
 numba>=0.60
+# JAX + blackjax: pm.sample(nuts_sampler="blackjax",
+# nuts_sampler_kwargs={"chain_method": "parallel"}) is what runs in
+# production now. Pinned with floors; 0.10 / 1.5 are the versions
+# verified locally — bump in lockstep with pymc upgrades.
+jax>=0.10
+blackjax>=1.5
 # DuckDB powers the schema-tolerant parquet reader used by predict_4a /
 # predict_5a / the bake-off scripts (hive_partitioning + union_by_name).
 duckdb>=1.0
