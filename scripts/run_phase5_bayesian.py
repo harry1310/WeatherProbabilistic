@@ -99,7 +99,28 @@ def main() -> None:
                    help="Per-chain warmup draws (default 2000).")
     p.add_argument("--chains", type=int, default=DEFAULT_SAMPLER_CHAINS,
                    help="Number of MCMC chains (default 4).")
+    # Multiprocess-chain experiment flags. When --chain-seed is set the
+    # script runs as ONE worker of a multiprocess sweep: it uses the given
+    # seed (so 4 workers with seeds {0,1,2,3} produce 4 independent
+    # chains), writes its trace to --output-path verbatim, and SKIPS the
+    # full post-processing (rhat / ess / test predictions / R2 push) —
+    # those belong to a follow-up merge step. Production runs leave both
+    # flags blank and the script runs in single-process mode as before.
+    p.add_argument("--chain-seed", type=int, default=None,
+                   help=("Multiprocess mode: override RANDOM_SEED for this "
+                         "worker's chain. Implies --chains 1 + skip "
+                         "post-processing. Leave blank for single-process."))
+    p.add_argument("--output-path", type=str, default=None,
+                   help=("Multiprocess mode: NetCDF path for this worker's "
+                         "trace. Defaults to POSTERIOR_DIR/lead_feature.nc "
+                         "in single-process mode."))
     args = p.parse_args()
+    multiprocess_worker = args.chain_seed is not None
+    if multiprocess_worker:
+        if args.chains != 1 and args.chains != DEFAULT_SAMPLER_CHAINS:
+            print(f"::warning::--chain-seed implies --chains 1; overriding "
+                  f"explicit --chains {args.chains}.")
+        args.chains = 1
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     POSTERIOR_DIR.mkdir(parents=True, exist_ok=True)
@@ -170,9 +191,11 @@ def main() -> None:
     except Exception as e:
         print(f"[{time.strftime('%H:%M:%S')}] JAX device probe failed: {e}")
 
+    seed_for_this_run = args.chain_seed if multiprocess_worker else RANDOM_SEED
     print(f"\n[{time.strftime('%H:%M:%S')}] Fitting partial-pool posterior — "
           f"chains={args.chains}, tune={args.tune}, draws={args.draws}, "
-          f"n_obs={len(ds.X_train_s):,}")
+          f"n_obs={len(ds.X_train_s):,}, seed={seed_for_this_run}"
+          f"{' (multiprocess worker)' if multiprocess_worker else ''}")
     t0 = time.time()
     fit = fit_partial_pooling(
         X_train_s=ds.X_train_s,
@@ -181,9 +204,23 @@ def main() -> None:
         station_codes=ds.station_codes,
         feature_names=ds.feature_names,
         draws=args.draws, tune=args.tune, chains=args.chains,
-        target_accept=0.9, random_seed=RANDOM_SEED, progressbar=True,
+        target_accept=0.9, random_seed=seed_for_this_run, progressbar=True,
     )
     print(f"[{time.strftime('%H:%M:%S')}] Posterior fit in {(time.time()-t0)/60:.1f} min")
+
+    # Multiprocess workers: dump the trace verbatim and exit. The merge
+    # step (separate script) loads all 4 traces, concatenates along
+    # `chain`, then runs rhat / ess / test predictions on the merged
+    # InferenceData. Single-process runs continue with the full
+    # post-processing below.
+    if multiprocess_worker:
+        out_path = Path(args.output_path) if args.output_path else (POSTERIOR_DIR / f"lead_feature_chain_{seed_for_this_run}.nc")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        fit.idata.to_netcdf(out_path)
+        print(f"[{time.strftime('%H:%M:%S')}] Multiprocess worker wrote trace → {out_path}")
+        print(f"[{time.strftime('%H:%M:%S')}] Skipping rhat / ess / test-predictions "
+              f"(rhat needs ≥2 chains; merge step computes them on the combined trace).")
+        return
 
     s = az.summary(fit.idata, var_names=["mu_intercept", "sigma_intercept", "mu_beta", "sigma_beta"])
     rhat = float(s["r_hat"].max())
