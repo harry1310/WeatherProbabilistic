@@ -357,23 +357,32 @@ jobs:
 
       - name: Add 16 GB swap (5a INLA headroom)
         # INLA 25.10 fitting 175k rows × 18 fixed effects + 18 random-
-        # slope blocks peaks at ~10-15 GB RAM during the latent-field
-        # Cholesky. ubuntu-latest provides 7 GB RAM + 4 GB default swap,
-        # which OOM-killed run 25690642625 ~50 min into Train 5a (annotated
-        # "The hosted runner lost communication with the server"). The
-        # local box has 16 GB physical so the fit completes there.
+        # slope blocks peaks well above ubuntu-latest's 7 GB RAM during
+        # the latent-field Cholesky. Run 25690642625 OOM-killed at ~50
+        # min ("hosted runner lost communication"); first swap-fix
+        # attempt (25694883496) failed because the runner ships with
+        # an already-active /swapfile and fallocate refused to overwrite
+        # it ("Text file busy").
         #
-        # 16 GB swap file on the runner's SSD (~14 GB free, plenty)
-        # gives INLA enough virtual memory to spill the workspace.
-        # Trade-off: ~5-10 min slower wall if it actually spills under
-        # load. Sunday-only cadence, fine.
+        # Two adjustments vs the first attempt:
+        #   1. swapoff the runner's default /swapfile first so we can
+        #      free its handle and discard the pre-existing 4 GB swap.
+        #   2. Mint the new 16 GB swap on /mnt — the runner's secondary
+        #      SSD partition has ~80 GB free (vs ~14 GB on /), so the
+        #      file slot is generous and won't compete with R installs
+        #      + temporary R subprocess CSVs on /.
         if: steps.gate.outputs.proceed == 'true' && steps.phases.outputs.run_5a == 'true'
         run: |
-          sudo fallocate -l 16G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          echo "Swap status after adding /swapfile:"
+          echo "--- swap before ---"
+          swapon --show || true
+          free -h
+          sudo swapoff -a || true
+          sudo rm -f /swapfile
+          sudo fallocate -l 16G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          echo "--- swap after ---"
           swapon --show
           free -h
 
