@@ -112,26 +112,30 @@ def load_fit_from_disk(feature_names: list[str], station_codes: list[str]) -> Pa
 
 
 def main() -> None:
+    # 2026-05-11: switched to feature_set='full' (20 features pre-lead,
+    # 21 with lead-as-feature) to match the new INLA backend in
+    # run_phase5_bayesian.py. The old --add-spread-features flag is
+    # retained for back-compat but is a no-op — the full feature set
+    # already includes precip_max + precip_agreement_wet_01 plus the
+    # missing 11 features (precip_mean/std, 7 atmospheric ensemble
+    # means, doy_sin/cos) that the prior 10-feat 5a was missing.
     import argparse
     p = argparse.ArgumentParser()
     p.add_argument(
         "--add-spread-features",
         action="store_true",
-        help=("Match the run_phase5_bayesian flag — must agree with the "
-              "trained posterior's feature set or the live bundle scaler "
-              "won't match the posterior's coefficient shape and predict_5a "
-              "will mis-score every row. Off by default."),
+        help="(deprecated, no-op) Always uses the full 20+1-feature set.",
     )
     args = p.parse_args()
+    _ = args  # silence linter — args.add_spread_features intentionally ignored.
 
     PREDICTIONS_DIR.mkdir(parents=True, exist_ok=True)
 
-    variant = "10-feat (spread)" if args.add_spread_features else "8-feat"
     print(f"[{time.strftime('%H:%M:%S')}] Loading Phase 3 dataset "
-          f"(5-model, lead-as-feature, {variant})")
+          f"(5-model, lead-as-feature, full-21feat for INLA backend)")
     ds = prepare_phase3_dataset(
         models=MODELS_NO_UKMO, lead_as_feature=True,
-        add_spread_features=args.add_spread_features,
+        feature_set="full",
         verbose=False,
     )
     print(f"  test rows: {len(ds.X_test):,}  features: {len(ds.feature_names)}")

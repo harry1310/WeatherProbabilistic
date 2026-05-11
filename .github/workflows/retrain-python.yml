@@ -13,18 +13,22 @@ name: retrain-python
 #   - Day-of-week + force gate for future Sunday-cron triggering — even
 #     though slice 1 is manual-only, the gate is wired so the workflow
 #     is ready for slice 3's automatic trigger.
-#   - JAX device count assertion for the 5a path (catches the
-#     XLA_FLAGS=--xla_force_host_platform_device_count=4 setup not
-#     taking effect in CI; production phase5 took 246 min on the
-#     1-device fallback before we discovered this).
 #   - Artefacts uploaded as workflow artifacts for manual inspection.
 #     R2 push + commit-back come in slice 2 once the user's tested
 #     the basic flow.
 #
+# 2026-05-11: 5a backend swapped from PyMC + blackjax NUTS to R-INLA
+# (deterministic Laplace approximation, ~10s fit vs 3h MCMC). The JAX
+# XLA_FLAGS env-var + device-count assertion + sampler chain/tune/draws
+# overrides are gone — INLA has no warmup, no chains, and is fast enough
+# that smoke-test sampler overrides aren't useful. R is now needed by
+# BOTH phases (dbarts for 4a, INLA for 5a) so the install step is no
+# longer 4a-gated.
+#
 # Cost ballpark on ubuntu-latest (4 vCPU):
-#   - 4a only: ~25 min (3 stations sequentially)
-#   - 5a only: ~3 hours (4 chains × 2000+2000 iters, pmap'd 4 devices)
-#   - all:     ~3.5 hours
+#   - 4a only: ~75-120 min (3 stations × 5 leads, ~5-8 min each BART fit)
+#   - 5a only: ~10 min (INLA fit ~30s; bulk is R + INLA install ~5 min)
+#   - all:     ~80-130 min
 
 on:
   # Automated path (Sunday): WeatherBlend's previous-runs-refresh fires
@@ -53,36 +57,24 @@ on:
         default: true
         type: boolean
       add_spread_features:
-        description: "5a only — include precip_max + precip_agreement_wet_01 in the feature set (pilot-validated 2026-05-10; drops dry-tail floor materially). Off by default."
+        description: "5a only — DEPRECATED no-op (INLA backend uses the full feature set unconditionally). Retained so old saved-dispatch payloads don't 422."
         required: false
         default: false
         type: boolean
-      sampler_draws:
-        description: "5a only — per-chain post-warmup draws. Blank = script default (2000). Smoke-tests use 200."
-        required: false
-        default: ""
-        type: string
-      sampler_tune:
-        description: "5a only — per-chain warmup draws. Blank = script default (2000). Smoke-tests use 200."
-        required: false
-        default: ""
-        type: string
-      sampler_chains:
-        description: "5a only — number of MCMC chains. Blank = script default (4). 1 to isolate per-chain wall, 4 to test pmap parallelism."
+      posterior_draws:
+        description: "5a only — joint posterior samples drawn from INLA's Laplace-approximated posterior. Blank = script default (1000). Affects CI sharpness only; fit time is constant."
         required: false
         default: ""
         type: string
 
 concurrency:
-  # Production retrains with default sampler size share the same key per
-  # `phases` so the Sunday cron never runs two simultaneous 5a fits that
-  # race for the R2 push slot. Smoke tests with explicit sampler_chains/
-  # sampler_draws overrides get distinct keys so they CAN run in parallel
-  # — useful for parallelism diagnostics (compare 1-chain vs 4-chain
-  # wall times in parallel rather than back-to-back). Empty input
-  # collapses to the literal "default" tag so the production key shape
-  # stays unchanged.
-  group: weatherprobabilistic-retrain-${{ inputs.phases }}-${{ inputs.sampler_chains || 'default' }}-${{ inputs.sampler_draws || 'default' }}
+  # One slot per (phases, posterior_draws) tuple. Production retrains
+  # share the same key per `phases` so the Sunday cron never runs two
+  # simultaneous 5a fits that race for the R2 push slot. Custom
+  # posterior_draws values get distinct keys so a diagnostic run can sit
+  # alongside a production run. Empty input collapses to "default" so
+  # the production key shape is stable.
+  group: weatherprobabilistic-retrain-${{ inputs.phases }}-${{ inputs.posterior_draws || 'default' }}
   cancel-in-progress: false
 
 jobs:
@@ -92,15 +84,7 @@ jobs:
     # for 4a; +30 min slack for setup, R install, R2 sync, artifact
     # upload. Job-level timeout fires before GitHub's default 360 min
     # in case anything stalls.
-    timeout-minutes: 360
-    # Belt-and-braces XLA_FLAGS for blackjax chain pmap'ing across 4
-    # virtual CPU devices. phase2_partial_pooling.py also sets this at
-    # module-import time via os.environ.setdefault, but setting it at
-    # the job level guarantees the env-var is in place even if the
-    # module setdefault gets removed in some future refactor. JAX reads
-    # this once at backend init; no runtime cost.
-    env:
-      XLA_FLAGS: "--xla_force_host_platform_device_count=4"
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
 
@@ -261,18 +245,36 @@ jobs:
         with:
           python-version: "3.12"
 
-      # R + dbarts needed for 4a only. Install conditionally so 5a-only
-      # runs save the ~3 min apt + R-package install.
-      - name: Install R + dbarts (4a only)
-        if: steps.gate.outputs.proceed == 'true' && steps.phases.outputs.run_4a == 'true'
+      # R is needed by BOTH phases now (dbarts for 4a, INLA for 5a) so
+      # apt install runs whenever either flag is set. Per-phase R packages
+      # then install conditionally so a 5a-only run skips dbarts and vice
+      # versa.
+      - name: Install R
+        if: steps.gate.outputs.proceed == 'true' && (steps.phases.outputs.run_4a == 'true' || steps.phases.outputs.run_5a == 'true')
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends r-base r-base-dev libtirpc-dev python3-dev
           R --version
           mkdir -p ~/R/x86_64-pc-linux-gnu-library/4.4
           echo 'R_LIBS_USER=~/R/x86_64-pc-linux-gnu-library/4.4' >> ~/.Renviron
+
+      - name: Install dbarts (4a)
+        if: steps.gate.outputs.proceed == 'true' && steps.phases.outputs.run_4a == 'true'
+        run: |
           R -e 'install.packages("dbarts", repos="https://cloud.r-project.org", lib=Sys.getenv("R_LIBS_USER"))'
           R -e 'library(dbarts); cat("dbarts version:", as.character(packageVersion("dbarts")), "\n")'
+
+      - name: Install INLA (5a)
+        # INLA's stable repo serves pre-built Linux binaries via R's
+        # install.packages mechanism. dep="Imports" pulls Matrix + sp +
+        # methods (the actual runtime requirements for `f(idx, "iid")`
+        # random-effect models) but skips Suggests (sf/INLAspacetime/etc)
+        # which would drag in libgdal-dev + libudunits2-dev for no gain
+        # on the 5a code path.
+        if: steps.gate.outputs.proceed == 'true' && steps.phases.outputs.run_5a == 'true'
+        run: |
+          R -e 'options(repos = c(CRAN = "https://cloud.r-project.org", INLA = "https://inla.r-inla-download.org/R/stable")); install.packages("INLA", lib = Sys.getenv("R_LIBS_USER"), dep = c("Depends", "Imports"))'
+          R -e 'library(INLA); cat("INLA version:", as.character(packageVersion("INLA")), "\n")'
 
       - name: Install Python deps
         if: steps.gate.outputs.proceed == 'true'
@@ -283,22 +285,11 @@ jobs:
           pip install -r requirements.txt
           if [ "${{ steps.phases.outputs.run_4a }}" = "true" ]; then
             # rpy2<3.6 because rpy2 3.6+ references R_getVar (R 4.5+)
-            # which Ubuntu 24.04's r-base 4.4 doesn't expose.
+            # which Ubuntu 24.04's r-base 4.4 doesn't expose. 5a's INLA
+            # bridge talks to R via subprocess + CSV (not rpy2) so this
+            # is 4a-only.
             pip install 'rpy2<3.6'
           fi
-
-      - name: Verify JAX device count (5a only)
-        # Fast-fail BEFORE the 3-hour sample call if the env-var didn't
-        # take effect — without 4 devices the chain pmap silently falls
-        # back to sequential and we'd burn the runner for ~12h instead.
-        if: steps.gate.outputs.proceed == 'true' && steps.phases.outputs.run_5a == 'true'
-        run: |
-          python -c "
-          import jax
-          ds = jax.devices()
-          print(f'JAX devices: {ds}')
-          assert len(ds) == 4, f'Expected 4 CpuDevices for chain pmap parallelism, got {len(ds)}. XLA_FLAGS at job level should make JAX virtualise 4 devices on the 4-vCPU runner.'
-          "
 
       - name: Pull data trees from R2
         # Both 4a and 5a need the forecast tree + EA truth. Pull once,
@@ -339,33 +330,19 @@ jobs:
         if: steps.gate.outputs.proceed == 'true' && steps.phases.outputs.run_5a == 'true'
         env:
           WEATHERBLEND_DATA_ROOT: ${{ github.workspace }}/../WeatherBlend/data
+          R_LIBS_USER: /home/runner/R/x86_64-pc-linux-gnu-library/4.4
         run: |
-          # Two-step: sample posterior, then build live bundle + test
+          # Two-step: fit posterior, then build live bundle + test
           # predictions parquet. extend_5a depends on the freshly-written
           # posterior NetCDF from run_phase5_bayesian.
           ARGS=""
           if [ "${{ steps.spread.outputs.flag }}" = "true" ]; then
+            # No-op under INLA but the flag is accepted for back-compat.
             ARGS="--add-spread-features"
-            echo "::notice::Running 5a in 10-feature spread-features mode."
+            echo "::notice::--add-spread-features passed but ignored (INLA backend uses full feature set)."
           fi
-          # Sampler-size overrides for CI smoke-tests. Blank input → use
-          # script defaults (2000 / 2000 / 4 = ~3h production run). Small
-          # values (e.g. 200 / 200 / 1) finish in minutes — useful for
-          # diagnosing whether chain_method="parallel" actually pmap's
-          # across multiple CPU devices in CI.
-          DRAWS="${{ inputs.sampler_draws }}"
-          TUNE="${{ inputs.sampler_tune }}"
-          CHAINS="${{ inputs.sampler_chains }}"
-          if [ -n "$DRAWS"  ]; then ARGS="$ARGS --draws $DRAWS";   echo "::notice::Sampler override: draws=$DRAWS";   fi
-          if [ -n "$TUNE"   ]; then ARGS="$ARGS --tune $TUNE";     echo "::notice::Sampler override: tune=$TUNE";     fi
-          if [ -n "$CHAINS" ]; then ARGS="$ARGS --chains $CHAINS"; echo "::notice::Sampler override: chains=$CHAINS"; fi
-          # extend_5a builds the live_bundle StandardScaler from the
-          # SAME prepare_phase3_dataset call shape as the trainer — pass
-          # the spread-features flag so the scaler matches the posterior's
-          # feature set. Mismatched flags here = predict_5a feeds
-          # wrong-shaped X to the posterior and silently mis-scores every
-          # row. Sampler-size overrides apply ONLY to the posterior fit;
-          # extend_5a doesn't sample, it just loads + predicts.
+          DRAWS="${{ inputs.posterior_draws }}"
+          if [ -n "$DRAWS" ]; then ARGS="$ARGS --draws $DRAWS"; echo "::notice::Posterior draws override: $DRAWS"; fi
           python -u scripts/run_phase5_bayesian.py $ARGS
           EXTEND_ARGS=""
           if [ "${{ steps.spread.outputs.flag }}" = "true" ]; then

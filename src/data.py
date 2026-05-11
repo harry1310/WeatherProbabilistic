@@ -374,7 +374,7 @@ def _load_all_forecasts_multi_lead_rich(
     forecasts["precip_max"]  = np.nanmax(pmat, axis=1)
     wet = (pmat >= WET_THRESHOLD_MM).astype("float64")
     present = (~np.isnan(pmat)).astype("float64")
-    forecasts["precip_agreement_wet01"] = np.where(
+    forecasts["precip_agreement_wet_01"] = np.where(
         present.sum(axis=1) > 0,
         wet.sum(axis=1) / present.sum(axis=1),
         np.nan,
@@ -585,6 +585,7 @@ def prepare_phase3_dataset(
     models: tuple[str, ...] = MODELS,
     lead_as_feature: bool = False,
     add_spread_features: bool = False,
+    feature_set: str = "minimal",
 ) -> Phase3Dataset:
     """Three-station × multi-lead loader for Phase 3.
 
@@ -604,8 +605,28 @@ def prepare_phase3_dataset(
     Phase 4 passes ``models=MODELS_NO_UKMO`` to fit a 5-model variant with
     UKMO removed entirely from the join (so we no longer row-drop on UKMO
     null). Default is the original 6-model behaviour.
+
+    ``feature_set`` selects the feature shape:
+      - ``"minimal"`` (default, 8 features): per-model precip + hour_sin/cos.
+        With ``add_spread_features=True`` adds precip_max +
+        precip_agreement_wet_01 (10 features). The historical 5a default.
+      - ``"full"`` (20 features pre-lead): the 3a/4a feature set —
+        per-model precip + precip_{mean,std,max,agreement_wet01} +
+        atmospheric ensemble means (rh, cloud_low/mid/high, cape,
+        wind_speed, dew_depression) + cyclic hour_sin/cos + doy_sin/cos.
+        Adds another column when lead_as_feature=True. Promoted for
+        5a INLA backend 2026-05-11 — closer feature parity with 3a/4a
+        lets the hierarchical logreg condition on the same signals the
+        tree-based champions use.
     """
-    forecasts, precip_cols = _load_all_forecasts_multi_lead(leads, verbose=verbose, models=models)
+    if feature_set == "full":
+        forecasts, precip_cols = _load_all_forecasts_multi_lead_rich(
+            leads, verbose=verbose, models=models)
+    elif feature_set == "minimal":
+        forecasts, precip_cols = _load_all_forecasts_multi_lead(
+            leads, verbose=verbose, models=models)
+    else:
+        raise ValueError(f"feature_set must be 'minimal' or 'full', got {feature_set!r}")
 
     # Optional spread features mirroring 3a/4a's non-linear inputs:
     # precip_max captures "at least one NWP says wet", precip_agreement_wet_01
@@ -640,15 +661,47 @@ def prepare_phase3_dataset(
             print(f"  truth rows: {len(truth):,}  wet fraction: {truth['observed_wet'].mean():.3f}")
 
         df = truth[["ValidTimeUtc", "observed_wet"]].merge(forecasts, on="ValidTimeUtc", how="inner")
-        df, fn = _select_features(df, precip_cols, verbose=verbose, models=models)
-        if add_spread_features:
-            # Append after the per-NWP precip block, before the cyclical
-            # features and the optional `lead` column — keeps the column
-            # order aligned with 3a/4a (precip_<m> → spread → cyclical →
-            # lead) so a future cross-model feature-importance comparison
-            # can index the same way.
-            insert_at = len(precip_cols)
-            fn = list(fn[:insert_at]) + ["precip_max", "precip_agreement_wet_01"] + list(fn[insert_at:])
+        if feature_set == "full":
+            # Rich loader populates: per-model precip, all 4 precip
+            # stats, 7 atmospheric ensemble means, 4 cyclic. The 3
+            # cloud columns (cloud_low_mean / cloud_mid_mean /
+            # cloud_high_mean) are 100% null in Open-Meteo's
+            # previous_runs (offset_day) archive — same data 3a/4a
+            # train on. 3a's _select_features silently drops them
+            # because of the null-fraction guard; we do it explicitly
+            # here so the feature_names list reflects what's actually
+            # usable (= 17 features pre-lead, 18 with lead).
+            fn = (
+                list(precip_cols)
+                + ["precip_mean", "precip_std", "precip_max", "precip_agreement_wet_01"]
+                + ["rh_mean", "cape_mean", "wind_speed_mean", "dew_depression_mean"]
+                + ["hour_sin", "hour_cos", "doy_sin", "doy_cos"]
+            )
+            # Defensive: any of the surviving features being all-null
+            # in this slice (shouldn't happen given the rich loader's
+            # inner-join, but belt-and-braces) gets dropped from the
+            # feature list before the dropna(subset=) below, which
+            # would otherwise kill every row.
+            usable = [c for c in fn if c in df.columns and not df[c].isna().all()]
+            dropped = [c for c in fn if c not in usable]
+            if dropped and verbose:
+                print(f"  feature_set=full: dropping all-null cols {dropped}")
+            fn = usable
+            before = len(df)
+            df = df.dropna(subset=fn).reset_index(drop=True)
+            if verbose:
+                print(f"  feature_set=full: {len(fn)} features, "
+                      f"{before:,} → {len(df):,} rows after null-drop")
+        else:
+            df, fn = _select_features(df, precip_cols, verbose=verbose, models=models)
+            if add_spread_features:
+                # Append after the per-NWP precip block, before the cyclical
+                # features and the optional `lead` column — keeps the column
+                # order aligned with 3a/4a (precip_<m> → spread → cyclical →
+                # lead) so a future cross-model feature-importance comparison
+                # can index the same way.
+                insert_at = len(precip_cols)
+                fn = list(fn[:insert_at]) + ["precip_max", "precip_agreement_wet_01"] + list(fn[insert_at:])
         if lead_as_feature:
             # Append a "lead" column to the feature set. Raw hours
             # (24/48/72) — the pooled StandardScaler below will turn it

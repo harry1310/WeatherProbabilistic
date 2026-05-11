@@ -63,7 +63,15 @@ import arviz as az  # noqa: E402
 
 from src.data import MODELS_NO_UKMO, prepare_phase3_dataset  # noqa: E402
 from src.retrain_guard import build_check_and_save_singleton  # noqa: E402
-from src.models.phase2_partial_pooling import (  # noqa: E402
+# Engine: INLA backend (random-intercept-only hierarchical logreg via
+# R-INLA) replaced PyMC + blackjax NUTS on 2026-05-11. Smoke validated
+# Brier match + CI widths within 10% of MCMC, with a ~1000× speedup
+# (10s INLA vs 3h PyMC on local; CI was 4h+ with broken pmap fallback).
+# See project_inla_5a_smoke_2026-05-11.md memory + src/models/
+# inla_partial_pooling.py docstring for the engine-swap rationale.
+# PyMC dependency retained in src.models.phase2_partial_pooling for
+# legacy/research use but not on the production code path.
+from src.models.inla_partial_pooling import (  # noqa: E402
     fit_partial_pooling, predict_partial_pooling,
 )
 
@@ -71,10 +79,14 @@ OUT_DIR = ROOT / "reports" / "phase5a_artefacts"
 POSTERIOR_DIR = OUT_DIR / "posteriors"
 PREDICTIONS_DIR = OUT_DIR / "predictions"
 
-DEFAULT_SAMPLER_DRAWS = 2000
-DEFAULT_SAMPLER_TUNE = 2000
-DEFAULT_SAMPLER_CHAINS = 4
-RANDOM_SEED = 42
+# INLA backend defaults (2026-05-11 swap from PyMC + blackjax NUTS).
+# `n_draws` = number of joint posterior samples drawn from INLA's
+# Laplace-approximated posterior. 1000 is well above what extend_5a /
+# predict_5a / the site CI bands need — quantiles converge much earlier.
+# The old DEFAULT_SAMPLER_TUNE / DEFAULT_SAMPLER_CHAINS / RANDOM_SEED
+# constants are dropped (INLA has no warmup phase, no chains, and is
+# deterministic given the same data).
+DEFAULT_POSTERIOR_DRAWS = 1000
 
 
 def main() -> None:
@@ -88,50 +100,28 @@ def main() -> None:
               "the dry-tail floor materially vs the 8-feature default. Off "
               "by default until promoted to production."),
     )
-    # CLI overrides for sampler size — primarily for CI smoke-tests
-    # diagnosing why blackjax's chain_method="parallel" pmap occasionally
-    # falls back to sequential. Compare 1-chain vs 4-chain wall-time at
-    # small draws to detect: parallel ≈ 1.5× sequential, fallback ≈ 4×.
-    # Production retrains use the defaults (2000/2000/4).
-    p.add_argument("--draws",  type=int, default=DEFAULT_SAMPLER_DRAWS,
-                   help="Per-chain post-warmup draws (default 2000).")
-    p.add_argument("--tune",   type=int, default=DEFAULT_SAMPLER_TUNE,
-                   help="Per-chain warmup draws (default 2000).")
-    p.add_argument("--chains", type=int, default=DEFAULT_SAMPLER_CHAINS,
-                   help="Number of MCMC chains (default 4).")
-    # Multiprocess-chain experiment flags. When --chain-seed is set the
-    # script runs as ONE worker of a multiprocess sweep: it uses the given
-    # seed (so 4 workers with seeds {0,1,2,3} produce 4 independent
-    # chains), writes its trace to --output-path verbatim, and SKIPS the
-    # full post-processing (rhat / ess / test predictions / R2 push) —
-    # those belong to a follow-up merge step. Production runs leave both
-    # flags blank and the script runs in single-process mode as before.
-    p.add_argument("--chain-seed", type=int, default=None,
-                   help=("Multiprocess mode: override RANDOM_SEED for this "
-                         "worker's chain. Implies --chains 1 + skip "
-                         "post-processing. Leave blank for single-process."))
-    p.add_argument("--output-path", type=str, default=None,
-                   help=("Multiprocess mode: NetCDF path for this worker's "
-                         "trace. Defaults to POSTERIOR_DIR/lead_feature.nc "
-                         "in single-process mode."))
+    p.add_argument("--draws", type=int, default=DEFAULT_POSTERIOR_DRAWS,
+                   help=("Joint posterior samples to draw from INLA's "
+                         "approximate posterior (default 1000). Affects "
+                         "CI sharpness only — INLA's fit itself is "
+                         "deterministic and ~10s regardless of this."))
     args = p.parse_args()
-    multiprocess_worker = args.chain_seed is not None
-    if multiprocess_worker:
-        if args.chains != 1 and args.chains != DEFAULT_SAMPLER_CHAINS:
-            print(f"::warning::--chain-seed implies --chains 1; overriding "
-                  f"explicit --chains {args.chains}.")
-        args.chains = 1
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     POSTERIOR_DIR.mkdir(parents=True, exist_ok=True)
     PREDICTIONS_DIR.mkdir(parents=True, exist_ok=True)
 
-    variant = "10-feat (spread)" if args.add_spread_features else "8-feat"
-    print(f"[{time.strftime('%H:%M:%S')}] Phase 5 Bayesian — lead-as-feature, "
-          f"5-model variant, {variant}")
+    print(f"[{time.strftime('%H:%M:%S')}] Phase 5 Bayesian — INLA backend, "
+          f"5-model + full-22-feature variant, random slopes + intercepts")
+    # 2026-05-11: 5a now uses the full 3a/4a-equivalent feature set
+    # (20 features pre-lead, 21 with lead-as-feature) and random
+    # slopes per station per feature. The --add-spread-features flag
+    # is retained as a no-op since spread features are part of the
+    # full feature_set='full' bundle now (was 8/10-feat toggle on
+    # the minimal feature set).
     ds = prepare_phase3_dataset(
         models=MODELS_NO_UKMO, lead_as_feature=True,
-        add_spread_features=args.add_spread_features,
+        feature_set="full",
         verbose=False,
     )
     print(f"  train rows: {len(ds.X_train):,}  test rows: {len(ds.X_test):,}")
@@ -162,7 +152,7 @@ def main() -> None:
             label_rates[code] = float(y_train_arr[mask].mean())
 
     version = datetime.now(timezone.utc).strftime("v%Y-%m-%d_%H%M%S_phase5a")
-    variant_tag = "10feat-spread" if args.add_spread_features else "8feat"
+    variant_tag = "full-21feat-rslopes"  # 20 features + lead, random intercepts + random slopes
 
     guard_result = build_check_and_save_singleton(
         _log,
@@ -181,21 +171,9 @@ def main() -> None:
         print("Phase 5a guard FAIL — skipping sample. Existing posterior + bundle stay live.")
         sys.exit(4)
 
-    # JAX device check at sample start so the log captures whether pmap
-    # has access to multiple devices. Useful for diagnosing chain-method
-    # fallback when wall-time exceeds expectations.
-    try:
-        import jax
-        print(f"[{time.strftime('%H:%M:%S')}] JAX devices: {jax.devices()} "
-              f"(local count={jax.local_device_count()}, total={jax.device_count()})")
-    except Exception as e:
-        print(f"[{time.strftime('%H:%M:%S')}] JAX device probe failed: {e}")
-
-    seed_for_this_run = args.chain_seed if multiprocess_worker else RANDOM_SEED
-    print(f"\n[{time.strftime('%H:%M:%S')}] Fitting partial-pool posterior — "
-          f"chains={args.chains}, tune={args.tune}, draws={args.draws}, "
-          f"n_obs={len(ds.X_train_s):,}, seed={seed_for_this_run}"
-          f"{' (multiprocess worker)' if multiprocess_worker else ''}")
+    print(f"\n[{time.strftime('%H:%M:%S')}] Fitting partial-pool posterior via INLA — "
+          f"n_obs={len(ds.X_train_s):,}, n_features={len(ds.feature_names)}, "
+          f"n_stations={len(ds.station_codes)}, draws={args.draws}")
     t0 = time.time()
     fit = fit_partial_pooling(
         X_train_s=ds.X_train_s,
@@ -203,31 +181,17 @@ def main() -> None:
         station_idx_train=ds.station_idx_train,
         station_codes=ds.station_codes,
         feature_names=ds.feature_names,
-        draws=args.draws, tune=args.tune, chains=args.chains,
-        target_accept=0.9, random_seed=seed_for_this_run, progressbar=True,
+        draws=args.draws,
     )
-    print(f"[{time.strftime('%H:%M:%S')}] Posterior fit in {(time.time()-t0)/60:.1f} min")
+    print(f"[{time.strftime('%H:%M:%S')}] Posterior ready in {(time.time()-t0):.1f}s")
 
-    # Multiprocess workers: dump the trace verbatim and exit. The merge
-    # step (separate script) loads all 4 traces, concatenates along
-    # `chain`, then runs rhat / ess / test predictions on the merged
-    # InferenceData. Single-process runs continue with the full
-    # post-processing below.
-    if multiprocess_worker:
-        out_path = Path(args.output_path) if args.output_path else (POSTERIOR_DIR / f"lead_feature_chain_{seed_for_this_run}.nc")
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        fit.idata.to_netcdf(out_path)
-        print(f"[{time.strftime('%H:%M:%S')}] Multiprocess worker wrote trace → {out_path}")
-        print(f"[{time.strftime('%H:%M:%S')}] Skipping rhat / ess / test-predictions "
-              f"(rhat needs ≥2 chains; merge step computes them on the combined trace).")
-        return
-
-    s = az.summary(fit.idata, var_names=["mu_intercept", "sigma_intercept", "mu_beta", "sigma_beta"])
-    rhat = float(s["r_hat"].max())
-    ess = float(s["ess_bulk"].min())
-    ndiv = int(fit.idata.sample_stats["diverging"].sum()) if "diverging" in fit.idata.sample_stats else 0
-    print(f"  rhat={rhat:.3f}  ess={ess:.0f}  div={ndiv}")
+    # rhat/ess/div diagnostics are MCMC-specific (Gelman-Rubin
+    # convergence between chains, divergent transitions). INLA's
+    # Laplace approximation is deterministic so they don't apply.
+    # The posterior NetCDF schema matches PyMC's so extend_5a +
+    # predict_5a read it unchanged.
     fit.idata.to_netcdf(POSTERIOR_DIR / "lead_feature.nc")
+    print(f"[{time.strftime('%H:%M:%S')}] Wrote posterior → {POSTERIOR_DIR / 'lead_feature.nc'}")
 
     # Per-row test predictions, keyed by (valid_time, station, lead) so
     # the comparison parquet has the same shape as Phase 4's per-lead
