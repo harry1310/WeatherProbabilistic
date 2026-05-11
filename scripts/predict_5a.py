@@ -57,6 +57,7 @@ from src.data import (  # noqa: E402
     LOCATION,
     MODELS_NO_UKMO,
     WEATHERBLEND_DATA_ROOT,
+    WET_THRESHOLD_MM,
 )
 from src.models.phase2_partial_pooling import (  # noqa: E402
     PartialPoolingFit,
@@ -98,9 +99,24 @@ def _load_fit(feature_names: list[str], station_codes: list[str]) -> PartialPool
 
 
 def _load_one_model_live_runs(model: str, window_dates: list[pd.Timestamp]) -> pd.DataFrame:
-    """Same as Phase 4's helper but WITHOUT the lead filter — we keep
-    every hourly forecast row in each cycle parquet."""
+    """Load per-model live-cycle parquets and produce the column set
+    needed for the rich feature build: precip + temp/dewpoint + relative
+    humidity + cape + wind. Columns renamed with `_<model>` suffix to
+    mirror src.data._load_model_forecasts_multi_lead_rich's output, so
+    the cross-model aggregation in build_feature_frame can reuse the
+    same math.
+
+    No lead filter — predict scores every hourly forecast row; the live
+    bundle's lead-as-feature design means leads outside the training
+    set (e.g. 144h, 168h) score correctly given the standardised lead
+    column the scaler applies."""
     model_dir = WEATHERBLEND_DATA_ROOT / "forecasts" / f"location={LOCATION}" / f"model={model}"
+    cols = [
+        "RunTimeUtc", "ValidTimeUtc", "LeadHours",
+        "Precipitation",
+        "Temperature2m", "DewPoint2m", "RelativeHumidity2m",
+        "Cape", "WindSpeed10m",
+    ]
     frames = []
     for d in window_dates:
         date_str = d.strftime("%Y-%m-%d")
@@ -108,15 +124,20 @@ def _load_one_model_live_runs(model: str, window_dates: list[pd.Timestamp]) -> p
         if not date_dir.exists():
             continue
         for path in sorted(date_dir.glob("run=*.parquet")):
-            df = pd.read_parquet(
-                path,
-                columns=["RunTimeUtc", "ValidTimeUtc", "LeadHours", "Precipitation"],
-            )
+            df = pd.read_parquet(path, columns=cols)
             if df.empty:
                 continue
             frames.append(df)
     if not frames:
-        return pd.DataFrame(columns=["ValidTimeUtc", "LeadHours", "RunTimeUtc", f"precip_{model}"])
+        return pd.DataFrame()
+    rename = {
+        "Precipitation":      f"precip_{model}",
+        "Temperature2m":      f"t_{model}",
+        "DewPoint2m":         f"td_{model}",
+        "RelativeHumidity2m": f"rh_{model}",
+        "Cape":               f"cape_{model}",
+        "WindSpeed10m":       f"wind_{model}",
+    }
     return (
         pd.concat(frames, ignore_index=True)
         # Latest cycle wins per (ValidTime, Lead) — different cycles producing
@@ -124,21 +145,32 @@ def _load_one_model_live_runs(model: str, window_dates: list[pd.Timestamp]) -> p
         # be stale.
         .sort_values(["ValidTimeUtc", "LeadHours", "RunTimeUtc"])
         .drop_duplicates(subset=["ValidTimeUtc", "LeadHours"], keep="last")
-        .rename(columns={"Precipitation": f"precip_{model}"})
+        .rename(columns=rename)
         .reset_index(drop=True)
     )
 
 
 def build_feature_frame(anchor: pd.Timestamp) -> pd.DataFrame:
-    """Per-model hourly forecasts inner-joined on (ValidTime, Lead).
-    Output columns: ValidTimeUtc, LeadHours, precip_<model>×5,
-    hour_sin, hour_cos, lead. The 'lead' column duplicates LeadHours
-    but in float form for the StandardScaler — keeps the column order
-    matching the metadata feature_names list."""
+    """Per-model hourly forecasts inner-joined on (ValidTime, Lead),
+    plus the cross-model ensemble aggregates the rich 18-feature 5a
+    bundle needs. Mirrors src.data._load_all_forecasts_multi_lead_rich
+    column-for-column so the saved StandardScaler maps the live frame
+    to the same standardised space the training data was in.
+
+    Output columns the predict path consumes:
+      - precip_<model> × 5             (raw per-model precip)
+      - precip_mean / std / max / agreement_wet_01  (cross-model spread)
+      - rh_mean, cape_mean, wind_speed_mean, dew_depression_mean
+        (cross-model ensemble means; matches training side's covariates)
+      - hour_sin, hour_cos, doy_sin, doy_cos    (cyclic calendar)
+      - lead                            (raw hours; scaler z-scores it)
+    """
     # 4-day-back lookback catches lead-72/96 cycles + a buffer for late
     # landings; +1d forward in case anchor is mid-day and a freshly
-    # published cycle's date partition reads as 'tomorrow' UTC.
-    window_dates = [anchor + pd.Timedelta(days=d) for d in range(-4, 2)]
+    # published cycle's date partition reads as 'tomorrow' UTC. Lead 120
+    # extends the relevant historical window slightly — anchor-6d picks
+    # up a 144h cycle published 6 days ago.
+    window_dates = [anchor + pd.Timedelta(days=d) for d in range(-6, 2)]
 
     frames: list[pd.DataFrame] = []
     missing_models: list[str] = []
@@ -148,9 +180,12 @@ def build_feature_frame(anchor: pd.Timestamp) -> pd.DataFrame:
             print(f"  WARN: no live forecasts found for {model} in window")
             missing_models.append(model)
             continue
-        if "provenance_run" not in df.columns:
-            df = df.rename(columns={"RunTimeUtc": "provenance_run"}) if model == MODELS_NO_UKMO[0] \
-                else df.drop(columns=["RunTimeUtc"])
+        # Carry the lead model's RunTimeUtc as provenance; drop the
+        # rest to keep the merge clean.
+        if model == MODELS_NO_UKMO[0]:
+            df = df.rename(columns={"RunTimeUtc": "provenance_run"})
+        else:
+            df = df.drop(columns=["RunTimeUtc"])
         frames.append(df)
 
     if missing_models:
@@ -162,15 +197,67 @@ def build_feature_frame(anchor: pd.Timestamp) -> pd.DataFrame:
 
     forecasts = frames[0]
     for fc in frames[1:]:
-        forecasts = forecasts.merge(fc, on=["ValidTimeUtc", "LeadHours"], how="inner")
+        # Outer-merge so a row survives when at least one NWP has data at
+        # that (validtime, lead). Matches training-side data.py's switch
+        # (2026-05-11) — long-lead rows where meteofrance_seamless's
+        # archive doesn't reach still produce a 5a prediction, with
+        # precip_meteofrance_seamless imputed from the saved median.
+        forecasts = forecasts.merge(fc, on=["ValidTimeUtc", "LeadHours"], how="outer")
     if forecasts.empty:
         return forecasts
 
-    # Cyclical hour features + lead-as-feature (raw hours; the saved scaler
-    # standardises it the same way it standardised the training column).
+    # Drop rows where ALL per-model precip columns are NaN — those rows
+    # have no NWP signal at all and aren't predictable.
+    precip_cols = [f"precip_{m}" for m in MODELS_NO_UKMO]
+    forecasts = forecasts.loc[
+        forecasts[precip_cols].notna().any(axis=1)
+    ].reset_index(drop=True)
+    if forecasts.empty:
+        return forecasts
+
+    # Cyclic calendar — hour AND day-of-year (matches the training side's
+    # _load_all_forecasts_multi_lead_rich).
     hours = forecasts["ValidTimeUtc"].dt.hour
     forecasts["hour_sin"] = np.sin(2 * np.pi * hours / 24)
     forecasts["hour_cos"] = np.cos(2 * np.pi * hours / 24)
+    doy = forecasts["ValidTimeUtc"].dt.dayofyear
+    forecasts["doy_sin"] = np.sin(2 * np.pi * (doy - 1) / 365.0)
+    forecasts["doy_cos"] = np.cos(2 * np.pi * (doy - 1) / 365.0)
+
+    # Cross-model precip spread features (skip-NaN aware, same shape as
+    # _load_all_forecasts_multi_lead_rich produces).
+    precip_cols = [f"precip_{m}" for m in MODELS_NO_UKMO]
+    pmat = forecasts[precip_cols].to_numpy(dtype="float64")
+    forecasts["precip_mean"] = np.nanmean(pmat, axis=1)
+    forecasts["precip_std"]  = np.nanstd(pmat, axis=1)
+    forecasts["precip_max"]  = np.nanmax(pmat, axis=1)
+    wet = (pmat >= WET_THRESHOLD_MM).astype("float64")
+    present = (~np.isnan(pmat)).astype("float64")
+    forecasts["precip_agreement_wet_01"] = np.where(
+        present.sum(axis=1) > 0,
+        wet.sum(axis=1) / present.sum(axis=1),
+        np.nan,
+    )
+
+    # Cross-model ensemble means for the four atmospheric covariates the
+    # rich training set uses. Cloud columns (cloud_low/mid/high_mean) are
+    # 100% null in the OM previous_runs archive and dropped at the data.py
+    # `feature_set='full'` runtime guard, so they aren't in the trained
+    # feature_names list — we don't compute them here.
+    for short, src in [("rh", "rh"), ("cape", "cape"), ("wind_speed", "wind")]:
+        cols = [f"{src}_{m}" for m in MODELS_NO_UKMO]
+        forecasts[f"{short}_mean"] = np.nanmean(
+            forecasts[cols].to_numpy(dtype="float64"), axis=1
+        )
+    dewdep_cols = []
+    for m in MODELS_NO_UKMO:
+        forecasts[f"_dewdep_{m}"] = forecasts[f"t_{m}"] - forecasts[f"td_{m}"]
+        dewdep_cols.append(f"_dewdep_{m}")
+    forecasts["dew_depression_mean"] = np.nanmean(
+        forecasts[dewdep_cols].to_numpy(dtype="float64"), axis=1
+    )
+    forecasts = forecasts.drop(columns=dewdep_cols)
+
     forecasts["lead"] = forecasts["LeadHours"].astype("float64")
     return forecasts
 
@@ -205,18 +292,30 @@ def write_metadata(out_models_dir: Path, station_slug: str, station_full_name: s
         "DataSource":  "open_meteo + bayesian_partial_pooling",
         "TrainedAtUtc": datetime.now(timezone.utc).isoformat(),
         "Hyperparameters": {
-            "library":          "pymc + nutpie",
-            "model":            "lead-as-feature partial-pooling Bayesian logistic regression",
+            "library":          "r-inla (via Rscript subprocess)",
+            "model":            "lead-as-feature partial-pooling Bayesian logistic regression "
+                                "with random intercepts + random slopes per (station × feature)",
             "leadAsFeature":    True,
             "stations":         "partial-pooled per station (varying intercept + slopes)",
+            "featureSet":       "full-21feat-rslopes (5 per-model precip + 4 precip-spread "
+                                "stats + 4 atmospheric ensemble means + 4 cyclic + lead)",
         },
         "DeviationsFromBrief": [
-            "Bayesian logistic regression (PyMC + nutpie NUTS sampler), "
-            "partial-pooled across stations with `lead` as a continuous "
-            "standardised feature column rather than a per-lead posterior stack.",
+            "Bayesian logistic regression fit via R-INLA's deterministic "
+            "Laplace approximation (replaced PyMC + blackjax NUTS 2026-05-11 "
+            "after a smoke run delivered ~1000x speedup at lower Brier). "
+            "Posterior sampled in ~36 min wall on 175k training rows; 1000 "
+            "joint samples persisted as `posteriors/lead_feature.nc` and "
+            "scored online.",
             "Five-model precip feature set (excludes ukmo_seamless because "
             "the lead-as-feature design conflicts with UKMO's hybrid "
             "UKV+UM-Global lead profile).",
+            "Leads 24/48/72/96/120 pooled into a single posterior with "
+            "`lead` as a standardised feature column. At leads 96/120, "
+            "meteofrance_seamless precip is missing (OM previous_runs "
+            "archive caps mf at 72h) and median-imputed from the training "
+            "distribution; random slopes per (station × feature) absorb "
+            "the imputed-constant signal at long leads.",
             "Predict-time evaluation only — TrainedAtUtc above is the live "
             "predict timestamp; the actual posterior was sampled offline "
             "and is reused unchanged across cron ticks.",
@@ -284,6 +383,7 @@ def main() -> None:
     station_full_names: list[str] = meta["station_full_names"]
     lead_hours: list[int] = [int(L) for L in meta["lead_hours"]]
     lead_feature_index: int = meta["lead_feature_index"]
+    feature_medians: dict[str, float] = meta.get("feature_medians", {})
     scaler = _load_scaler()
     print(f"  loaded bundle: features={feature_names} stations={station_codes}")
     print(f"  lead feature index: {lead_feature_index} "
@@ -315,8 +415,25 @@ def main() -> None:
         print("  no forecast rows for the live window — exiting.")
         return
 
-    # Build X in the SAME column order as training.
-    X = forecasts[feature_names].to_numpy(dtype="float64")
+    # Build X in the SAME column order as training, then impute any NaN
+    # cells using the training-time medians persisted in metadata. NaNs
+    # come from outer-join long-lead rows where one of the NWPs has no
+    # archive coverage at that lead (meteofrance_seamless above 72h).
+    X_df = forecasts[feature_names].copy()
+    if feature_medians:
+        for col in feature_names:
+            if X_df[col].isna().any() and col in feature_medians:
+                X_df[col] = X_df[col].fillna(feature_medians[col])
+    X = X_df.to_numpy(dtype="float64")
+    if np.isnan(X).any():
+        # Defensive — should not fire given the impute step above, but
+        # without medians or with a feature missing from the bundle the
+        # scaler.transform would silently produce NaN. Better to surface.
+        cols_with_nan = [c for c in feature_names if X_df[c].isna().any()]
+        raise RuntimeError(
+            f"NaN cells remain in features after median-imputation: {cols_with_nan}. "
+            f"Bundle metadata may be missing entries for these features."
+        )
     X_s = scaler.transform(X).astype("float64")
 
     rows_written = 0

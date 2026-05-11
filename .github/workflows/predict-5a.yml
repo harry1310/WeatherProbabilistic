@@ -54,10 +54,10 @@ jobs:
           python-version: "3.12"
 
       - name: Install Python deps
-        # Pin matches the local .venv. nutpie + numba are the load-bearing
-        # ones — pymc's default sampler needs g++ which the GH runner does
-        # have, but the local box doesn't, so we standardise on nutpie
-        # everywhere for reproducibility.
+        # Pin matches the local .venv. predict_5a is pure-Python at runtime
+        # (loads the persisted INLA posterior NetCDF via arviz, scaler.pkl
+        # via sklearn) — no R / INLA install needed here. The R-INLA fit
+        # only happens at TRAINING time in retrain-python.yml.
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
@@ -97,6 +97,28 @@ jobs:
               "../WeatherBlend/data/forecasts/location=bonehill_rocks/model=$m" \
               --fast-list --transfers 16 --checkers 32
           done
+
+      - name: Pull 5a bundle from R2
+        # Mirrors the pattern predict-4a.yml uses (rclone copy
+        # r2:.../data/models/precipitation ...). The bundle is the
+        # canonical posterior + scaler + metadata produced by
+        # retrain-python.yml's "Push 5a bundle to R2" step. Pulling it
+        # here means: (a) the bundle binaries don't need to live in git,
+        # and (b) auto-retrain → R2 → predict picks up a fresh posterior
+        # on the next cron tick without any commit-back step. ~5 MiB
+        # total (posterior NetCDF ~450 KB + small metadata + scaler),
+        # comfortably sub-second.
+        env:
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          mkdir -p ./reports/phase5a_artefacts/live_bundle
+          mkdir -p ./reports/phase5a_artefacts/posteriors
+          rclone copy "r2:${R2_BUCKET}/reports/phase5a_artefacts/live_bundle" \
+            ./reports/phase5a_artefacts/live_bundle \
+            --fast-list --transfers 16 --checkers 32
+          rclone copy "r2:${R2_BUCKET}/reports/phase5a_artefacts/posteriors" \
+            ./reports/phase5a_artefacts/posteriors \
+            --fast-list --transfers 16 --checkers 32
 
       - name: Run Phase 5a (Bayesian logistic regression) live predict
         # Single lead-as-feature partial-pool posterior, scored against the

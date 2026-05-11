@@ -26,7 +26,7 @@ boundary.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -84,6 +84,11 @@ STATIONS: tuple[tuple[str, str], ...] = (
 
 LEAD_HOURS = 24
 PHASE3_LEAD_HOURS: tuple[int, ...] = (24, 48, 72)
+# Phase 5a (lead-as-feature INLA) extends the lead horizon — `lead`
+# is a feature, so a single posterior scores every row regardless of
+# bucket. Two extra leads (96, 120) cover the +4d/+5d ahead window
+# where the live forecast tree has data and the EA truth lands.
+PHASE5A_LEAD_HOURS: tuple[int, ...] = (24, 48, 72, 96, 120)
 WET_THRESHOLD_MM = 0.1
 MAX_NULL_FRACTION = 0.5  # drop any feature column that is more than half null
 
@@ -139,6 +144,14 @@ class Phase3Dataset:
     station_full_names: list[str]
     lead_hours: list[int]
     scaler: StandardScaler
+    # Median values used to impute NaN feature cells before scaling.
+    # Empty dict for the legacy `feature_set='minimal'` path (which still
+    # row-drops on any NaN). Populated by `feature_set='full'` so the live
+    # predict bundle can apply the same imputation to a NaN-bearing live
+    # forecast row — needed when a long-lead row is missing some NWP
+    # column (e.g. precip_meteofrance at lead 96, where OM's previous_runs
+    # archive doesn't extend).
+    feature_medians: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -355,7 +368,14 @@ def _load_all_forecasts_multi_lead_rich(
         fc_frames.append(fc)
     forecasts = fc_frames[0]
     for fc in fc_frames[1:]:
-        forecasts = forecasts.merge(fc, on=["ValidTimeUtc", "LeadHours"], how="inner")
+        # Outer-join so a row survives when AT LEAST ONE NWP has a precip
+        # value at (ValidTimeUtc, LeadHours). Inner-join used to drop
+        # any row where any one of the configured NWPs was missing — that
+        # implicitly capped 5a's lead horizon at meteofrance_seamless's
+        # archive limit (72h). Outer-join + median-imputation of per-model
+        # precip columns at long leads mirrors what 3a/4a do via the SQL
+        # AVG + per-cell column-drop pattern, just in pandas.
+        forecasts = forecasts.merge(fc, on=["ValidTimeUtc", "LeadHours"], how="outer")
 
     # Cyclical calendar — hour AND day-of-year (WeatherBlend's 27-feature set has both)
     hours = forecasts["ValidTimeUtc"].dt.hour
@@ -677,21 +697,24 @@ def prepare_phase3_dataset(
                 + ["rh_mean", "cape_mean", "wind_speed_mean", "dew_depression_mean"]
                 + ["hour_sin", "hour_cos", "doy_sin", "doy_cos"]
             )
-            # Defensive: any of the surviving features being all-null
-            # in this slice (shouldn't happen given the rich loader's
-            # inner-join, but belt-and-braces) gets dropped from the
-            # feature list before the dropna(subset=) below, which
-            # would otherwise kill every row.
             usable = [c for c in fn if c in df.columns and not df[c].isna().all()]
             dropped = [c for c in fn if c not in usable]
             if dropped and verbose:
                 print(f"  feature_set=full: dropping all-null cols {dropped}")
             fn = usable
+            # Outer-join (introduced 2026-05-11 for the +96/+120 lead
+            # extension) means precip_<m> can be NaN for a (validtime,
+            # lead) cell where model m's archive doesn't reach. Drop
+            # rows where ALL per-model precip are NaN (no NWP signal
+            # at all); keep partial-NaN rows for median-imputation
+            # downstream of the train/test split. Mirrors the per-cell
+            # pattern 3a/4a use via SQL `AVG()` + cell-local column drop.
             before = len(df)
-            df = df.dropna(subset=fn).reset_index(drop=True)
+            survivors = df[precip_cols].notna().any(axis=1)
+            df = df.loc[survivors].reset_index(drop=True)
             if verbose:
                 print(f"  feature_set=full: {len(fn)} features, "
-                      f"{before:,} → {len(df):,} rows after null-drop")
+                      f"{before:,} → {len(df):,} rows after all-precip-NaN drop")
         else:
             df, fn = _select_features(df, precip_cols, verbose=verbose, models=models)
             if add_spread_features:
@@ -749,8 +772,27 @@ def prepare_phase3_dataset(
     train = pd.concat(train_frames, ignore_index=True)
     test = pd.concat(test_frames, ignore_index=True)
 
-    X_train = train[feature_names]
-    X_test = test[feature_names]
+    X_train = train[feature_names].copy()
+    X_test = test[feature_names].copy()
+
+    # Per-feature median imputation, computed on the COMBINED training
+    # slice (pooled across stations and leads) and applied to train +
+    # test alike. Only fires for feature_set='full' when outer-join
+    # produced NaN per-model precip columns at long leads; medians for
+    # always-present features are still recorded so the predict-side
+    # imputation path can apply a uniform fill regardless of which
+    # feature is null in any given live row.
+    feature_medians: dict[str, float] = {}
+    if feature_set == "full":
+        for col in feature_names:
+            arr = X_train[col].to_numpy(dtype="float64")
+            med = float(np.nanmedian(arr))
+            feature_medians[col] = med
+            if np.isnan(arr).any():
+                X_train[col] = X_train[col].fillna(med)
+            test_arr = X_test[col]
+            if test_arr.isna().any():
+                X_test[col] = X_test[col].fillna(med)
 
     # Pooled standardisation on the combined training set (across all cells).
     scaler = StandardScaler().fit(X_train.values)
@@ -786,6 +828,7 @@ def prepare_phase3_dataset(
         station_full_names=station_full_names,
         lead_hours=list(leads),
         scaler=scaler,
+        feature_medians=feature_medians,
     )
 
 

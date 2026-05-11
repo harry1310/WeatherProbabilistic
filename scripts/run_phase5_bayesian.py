@@ -61,7 +61,7 @@ sys.path.insert(0, str(ROOT))
 
 import arviz as az  # noqa: E402
 
-from src.data import MODELS_NO_UKMO, prepare_phase3_dataset  # noqa: E402
+from src.data import MODELS_NO_UKMO, PHASE5A_LEAD_HOURS, prepare_phase3_dataset  # noqa: E402
 from src.retrain_guard import build_check_and_save_singleton  # noqa: E402
 # Engine: INLA backend (random-intercept-only hierarchical logreg via
 # R-INLA) replaced PyMC + blackjax NUTS on 2026-05-11. Smoke validated
@@ -121,6 +121,7 @@ def main() -> None:
     # the minimal feature set).
     ds = prepare_phase3_dataset(
         models=MODELS_NO_UKMO, lead_as_feature=True,
+        leads=PHASE5A_LEAD_HOURS,
         feature_set="full",
         verbose=False,
     )

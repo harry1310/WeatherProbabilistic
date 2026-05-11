@@ -44,7 +44,7 @@ sys.path.insert(0, str(ROOT))
 
 import arviz as az  # noqa: E402
 
-from src.data import MODELS_NO_UKMO, prepare_phase3_dataset  # noqa: E402
+from src.data import MODELS_NO_UKMO, PHASE5A_LEAD_HOURS, prepare_phase3_dataset  # noqa: E402
 from src.models.phase2_partial_pooling import (  # noqa: E402
     PartialPoolingFit, predict_partial_pooling_summary,
 )
@@ -89,6 +89,10 @@ def save_live_bundle(ds) -> None:
         "scaler_scale": [float(x) for x in ds.scaler.scale_.tolist()],
         "scaler_var": [float(x) for x in ds.scaler.var_.tolist()],
         "scaler_n_samples_seen": int(ds.scaler.n_samples_seen_),
+        # Per-feature median used to impute NaN cells on the predict side
+        # (mirrors the training-time imputation in data.prepare_phase3_dataset).
+        # Empty for non-full feature sets where outer-join is not used.
+        "feature_medians": {k: float(v) for k, v in ds.feature_medians.items()},
     }
     (LIVE_BUNDLE_DIR / "metadata.json").write_text(json.dumps(metadata, indent=2))
     print(f"  wrote live bundle (scaler + metadata) to {LIVE_BUNDLE_DIR}")
@@ -135,6 +139,7 @@ def main() -> None:
           f"(5-model, lead-as-feature, full-21feat for INLA backend)")
     ds = prepare_phase3_dataset(
         models=MODELS_NO_UKMO, lead_as_feature=True,
+        leads=PHASE5A_LEAD_HOURS,
         feature_set="full",
         verbose=False,
     )
