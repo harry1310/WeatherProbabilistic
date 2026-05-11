@@ -401,7 +401,11 @@ jobs:
           # directory creation.
           TMPDIR: /mnt/tmp
         run: |
-          mkdir -p /mnt/tmp
+          # /mnt is root-owned on ubuntu-latest (just like /); a plain mkdir
+          # without sudo gets EACCES (run 25696864628). Create + chmod 777
+          # so R/INLA/Python all write fine as the unprivileged runner user.
+          sudo mkdir -p /mnt/tmp
+          sudo chmod 1777 /mnt/tmp
           echo "--- disk before train ---"
           df -h / /mnt
           df -i / /mnt
