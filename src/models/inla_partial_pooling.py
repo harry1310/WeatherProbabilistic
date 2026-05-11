@@ -39,6 +39,8 @@ from __future__ import annotations
 
 import io
 import os
+import platform
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -59,15 +61,36 @@ import xarray as xr
 @dataclass
 class PartialPoolingFit:
     """Mirror of src.models.phase2_partial_pooling.PartialPoolingFit so
-    extend_5a + predict_5a can consume INLA-backed fits unchanged."""
+    extend_5a + predict_5a can consume InteractiveData unchanged."""
     idata: object
     feature_names: list[str]
     station_codes: list[str]
 
 
-# Default R install paths — override via the function args / env vars.
-_DEFAULT_R_EXE        = r"C:\Program Files\R\R-4.6.0\bin\x64\R.exe"
-_DEFAULT_R_LIBS_USER  = r"C:\Users\rhcsl\R\win-library\4.6"
+def _default_r_exe() -> str:
+    """Locate Rscript: PATH first (works on both Linux CI runners and
+    Windows dev boxes), then platform-specific fallback.
+
+    Pre-2026-05-11 this was a hard-coded `C:\\Program Files\\R\\R-4.6.0\\
+    bin\\x64\\R.exe` Windows path — fine for local dev, broke instantly
+    in CI as soon as run_phase5_bayesian.py reached the subprocess call
+    (run 25689518652, FileNotFoundError on the Windows path). Override
+    via ``INLA_R_EXE`` env var for either platform."""
+    found = shutil.which("Rscript")
+    if found:
+        return found
+    if platform.system() == "Windows":
+        return r"C:\Program Files\R\R-4.6.0\bin\x64\Rscript.exe"
+    return "/usr/bin/Rscript"
+
+
+def _default_r_libs_user() -> str:
+    """Default R user library path. Linux CI sets R_LIBS_USER via the
+    workflow env; this fallback only fires for local dev or unusual
+    setups where the env var isn't set."""
+    if platform.system() == "Windows":
+        return r"C:\Users\rhcsl\R\win-library\4.6"
+    return os.path.expanduser("~/R/x86_64-pc-linux-gnu-library/4.4")
 
 
 # R script that fits INLA, samples N posterior draws, and dumps them as
@@ -208,8 +231,8 @@ def fit_partial_pooling(
     drawn from INLA's approximated posterior — defaults to 1000, which
     is well above what predict_partial_pooling needs (CI band quantiles
     converge well below that)."""
-    r_exe       = os.environ.get("INLA_R_EXE", _DEFAULT_R_EXE)
-    r_libs_user = os.environ.get("R_LIBS_USER", _DEFAULT_R_LIBS_USER)
+    r_exe       = os.environ.get("INLA_R_EXE") or _default_r_exe()
+    r_libs_user = os.environ.get("R_LIBS_USER") or _default_r_libs_user()
 
     n_features = X_train_s.shape[1]
     n_stations = len(station_codes)
@@ -247,8 +270,17 @@ def fit_partial_pooling(
               f"(n_train={len(train_df):,}, n_features={n_features}, "
               f"n_stations={n_stations}, n_draws={draws})", flush=True)
         t0 = time.time()
+        # Rscript handles non-interactive mode by default (no banner, no
+        # prompt) — invocation collapses to `Rscript fit_inla.R`. If the
+        # resolved r_exe is `R` rather than `Rscript`, fall back to the
+        # legacy --no-save --slave -f form so the call still works.
+        r_name = Path(r_exe).name.lower()
+        if r_name.startswith("rscript"):
+            r_argv = [r_exe, str(r_script)]
+        else:
+            r_argv = [r_exe, "--no-save", "--slave", "-f", str(r_script)]
         result = subprocess.run(
-            [r_exe, "--no-save", "--slave", "-f", str(r_script)],
+            r_argv,
             capture_output=True, text=True, env=env,
         )
         wall = time.time() - t0
