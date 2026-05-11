@@ -332,7 +332,16 @@ jobs:
             libudunits2-dev libgdal-dev libgeos-dev libproj-dev libsqlite3-dev
           R -e 'install.packages("fmesher", repos = "https://cloud.r-project.org", lib = Sys.getenv("R_LIBS_USER"))'
           R -e 'options(repos = c(CRAN = "https://cloud.r-project.org", INLA = "https://inla.r-inla-download.org/R/stable")); install.packages("INLA", lib = Sys.getenv("R_LIBS_USER"), dep = c("Depends", "Imports"))'
-          R -e 'library(INLA); cat("INLA version:", as.character(packageVersion("INLA")), "\n")'
+          # `sn` (skew-normal) is in INLA's Suggests, not Imports — so the
+          # dep=c("Depends","Imports") above skips it. inla.posterior.sample
+          # calls inla.create.sn.cache which inla.require's `sn`; without
+          # it, the fit completes but posterior sampling errors with
+          # "Package 'sn' is required to proceed, but is not installed."
+          # Verified failure mode on run 25698631211 — fit ran 15 min then
+          # died at sampling, wasting all that compute. Install sn here so
+          # the next retrain doesn't trip the same wall.
+          R -e 'install.packages("sn", repos = "https://cloud.r-project.org", lib = Sys.getenv("R_LIBS_USER"))'
+          R -e 'library(INLA); library(sn); cat("INLA version:", as.character(packageVersion("INLA")), "  sn version:", as.character(packageVersion("sn")), "\n")'
 
       - name: Install Python deps
         if: steps.gate.outputs.proceed == 'true'
