@@ -355,6 +355,28 @@ jobs:
           if [ -n "$ANCHOR" ]; then ARGS="--anchor $ANCHOR"; fi
           python -u scripts/train_4a.py $ARGS
 
+      - name: Add 16 GB swap (5a INLA headroom)
+        # INLA 25.10 fitting 175k rows × 18 fixed effects + 18 random-
+        # slope blocks peaks at ~10-15 GB RAM during the latent-field
+        # Cholesky. ubuntu-latest provides 7 GB RAM + 4 GB default swap,
+        # which OOM-killed run 25690642625 ~50 min into Train 5a (annotated
+        # "The hosted runner lost communication with the server"). The
+        # local box has 16 GB physical so the fit completes there.
+        #
+        # 16 GB swap file on the runner's SSD (~14 GB free, plenty)
+        # gives INLA enough virtual memory to spill the workspace.
+        # Trade-off: ~5-10 min slower wall if it actually spills under
+        # load. Sunday-only cadence, fine.
+        if: steps.gate.outputs.proceed == 'true' && steps.phases.outputs.run_5a == 'true'
+        run: |
+          sudo fallocate -l 16G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          echo "Swap status after adding /swapfile:"
+          swapon --show
+          free -h
+
       - name: Train 5a (Bayesian logreg)
         if: steps.gate.outputs.proceed == 'true' && steps.phases.outputs.run_5a == 'true'
         env:
