@@ -391,7 +391,20 @@ jobs:
         env:
           WEATHERBLEND_DATA_ROOT: ${{ github.workspace }}/../WeatherBlend/data
           R_LIBS_USER: /home/runner/R/x86_64-pc-linux-gnu-library/4.4
+          # Run 25695815670 failed at INLA's `*** Fail to create directory`
+          # under /tmp — / (~14 GB) is near-full after R + apt + fmesher
+          # source-build + Python deps stack. /mnt has ~80 GB free. R reads
+          # TMPDIR for tempdir(), and INLA creates its working files under
+          # tempdir() — so pointing R at /mnt for tmp keeps both INLA's
+          # workspace AND the swap (already on /mnt/swapfile) on the bigger
+          # SSD. mkdir guard in the run script below handles first-time
+          # directory creation.
+          TMPDIR: /mnt/tmp
         run: |
+          mkdir -p /mnt/tmp
+          echo "--- disk before train ---"
+          df -h / /mnt
+          df -i / /mnt
           # Two-step: fit posterior, then build live bundle + test
           # predictions parquet. extend_5a depends on the freshly-written
           # posterior NetCDF from run_phase5_bayesian.
