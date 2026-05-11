@@ -88,6 +88,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Free disk space (recover ~17 GB from preinstalled tooling)
+        # ubuntu-latest's / partition is 72 GB total but ~73% full at
+        # baseline (.NET / Android / CodeQL / Haskell / Chrome / Edge
+        # SDKs we don't need). MUST run before Install INLA — sf's source
+        # build needs ~3-5 GB temp on /, INLA itself adds ~3-4 GB
+        # installed, and the 16 GB swap step later eats another ~16 GB
+        # of disk (even on /mnt — / and /mnt are the same partition on
+        # current ubuntu-latest images). Without this step the swap
+        # allocation lands on a near-full disk and INLA's mkdir under
+        # tempdir() fails with "Fail to create directory" — exactly what
+        # killed run 25690642625 attempt 5.
+        #
+        # Verified empty disk-recovery numbers via 5a-runner-smoke run on
+        # 2026-05-11: ~17 GB freed (less than the 40-50 GB initial
+        # estimate; .NET/Android were smaller than I assumed) but
+        # plenty for the install + swap chain.
+        run: |
+          echo "--- df -h before cleanup ---"
+          df -h /
+          sudo rm -rf /usr/share/dotnet              || true
+          sudo rm -rf /usr/local/lib/android         || true
+          sudo rm -rf /opt/ghc                       || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL    || true
+          sudo rm -rf /opt/google/chrome             || true
+          sudo rm -rf /opt/microsoft/msedge          || true
+          sudo apt-get clean
+          echo "--- df -h after cleanup ---"
+          df -h /
+
       - name: Decide whether to proceed
         # Gate kept simple now that Cloudflare owns the cadence rule. Three
         # ways this workflow fires; each unambiguously decides:
