@@ -265,15 +265,31 @@ jobs:
           R -e 'library(dbarts); cat("dbarts version:", as.character(packageVersion("dbarts")), "\n")'
 
       - name: Install INLA (5a)
-        # INLA's stable repo serves pre-built Linux binaries. The repo
-        # metadata appears to under-declare its dependencies — first GH
-        # attempt failed at load with "no package called 'fmesher'" even
-        # though dep="Imports" was passed. fmesher is on CRAN, so we
-        # install it explicitly first; then INLA from r-inla.org with
-        # dep="Imports" picks up Matrix + sp + methods (the actual
-        # runtime requirements for `f(idx, "iid")` random-effect models)
-        # while skipping Suggests (sf/INLAspacetime) which would drag in
-        # libgdal-dev / libudunits2-dev for no gain on the 5a path.
+        # Recent INLA versions hard-require fmesher at load time (even for
+        # `f(..., 'iid')` random-effect models like ours that don't use
+        # any SPDE/mesh functionality). fmesher Imports sf, sf Imports
+        # units — and units' configure step needs libudunits2.so. Same
+        # transitive chain pulls libgdal/libgeos/libproj for sf itself.
+        # Without the apt-installed system libs, the source build of
+        # `units` errors out with "Configuration failed because
+        # libudunits2.so was not found" and the whole INLA load fails.
+        #
+        # Past attempts:
+        #   - 1st: relied on dep="Imports" to skip sf — INLA loaded
+        #     refused with "no package called 'fmesher'".
+        #   - 2nd: explicit install.packages("fmesher", ...) without
+        #     `dep` — pulled sf/units source builds, units configure
+        #     failed on missing libudunits2-dev. (Run 25688568871.)
+        #   - 3rd (this one): install the four sf-stack system libs via
+        #     apt first, then fmesher source-builds cleanly. ~3-5 min
+        #     compile time on top of the existing R install — acceptable
+        #     for the Sunday-only retrain cadence.
+        #
+        # Note: this whole step is required even though the model's
+        # formula uses only `f(..., 'iid')`. fmesher is a runtime load
+        # dep, not a feature dep. If a future INLA release decouples
+        # fmesher again, the system-libs apt + R install can both be
+        # dropped.
         #
         # Built-for-R-version warning: the r-inla stable binary is built
         # against R 4.5+ and ubuntu-latest's r-base is 4.4. The warning
@@ -282,6 +298,9 @@ jobs:
         # (the dependency-pull pattern below stays the same).
         if: steps.gate.outputs.proceed == 'true' && steps.phases.outputs.run_5a == 'true'
         run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libudunits2-dev libgdal-dev libgeos-dev libproj-dev libsqlite3-dev
           R -e 'install.packages("fmesher", repos = "https://cloud.r-project.org", lib = Sys.getenv("R_LIBS_USER"))'
           R -e 'options(repos = c(CRAN = "https://cloud.r-project.org", INLA = "https://inla.r-inla-download.org/R/stable")); install.packages("INLA", lib = Sys.getenv("R_LIBS_USER"), dep = c("Depends", "Imports"))'
           R -e 'library(INLA); cat("INLA version:", as.character(packageVersion("INLA")), "\n")'
