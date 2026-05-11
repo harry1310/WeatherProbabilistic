@@ -1,0 +1,130 @@
+name: 5a-runner-smoke
+
+# Fast-feedback smoke test for the runner-environment shenanigans that
+# the Train 5a step depends on (swap, /mnt mkdir, TMPDIR, sudo
+# permissions on /mnt). Runs in ~2-3 min vs retrain-python.yml's
+# ~15-min minimum (which has to install INLA + pull data trees from R2
+# before it can fail at the actual Train step).
+#
+# Repurposed 2026-05-11 from the (now-dead) PyMC multiprocess timing
+# smoke: that workflow's `run_phase5_bayesian.py --chain-seed` /
+# `--chains` / `--draws` flags were dropped when 5a swapped to R-INLA
+# (commit f2580ed), so the previous workflow body wouldn't even parse.
+# Rather than delete + create-new, repurposed in-place: same
+# `workflow_dispatch` shape, same concurrency-group prefix, same
+# author-runtime intent (cheap iteration on 5a CI plumbing).
+#
+# Use case: when a runner-env fix in retrain-python.yml needs more than
+# one cycle to land, fire THIS workflow first to validate the
+# swap/mkdir/TMPDIR plumbing in ~3 min, THEN copy the working steps
+# back into retrain-python.yml. Saves ~15 min per iteration; would
+# have caught attempts 4/5/6 of the 2026-05-11 INLA stand-up
+# (fallocate Text-file-busy, INLA tmpdir EACCES, mkdir EACCES) without
+# the install-INLA + pull-data-trees overhead each time.
+#
+# What's tested (mirrors retrain-python.yml's 5a-only path EXCEPT for
+# the INLA install + R2 data pull + actual Python train, which are the
+# slow parts and don't depend on this layer):
+#   - Disk + memory baseline (so we can see what we're working with)
+#   - 16 GB swap on /mnt — swapoff existing, fallocate new, swapon
+#   - sudo mkdir + chmod 1777 on /mnt/tmp — TMPDIR target
+#   - Write probe inside /mnt/tmp as the unprivileged runner user
+#   - r-base-core install (small, ~30s) — sanity check that R is on PATH
+#   - Rscript tempdir() check — confirms TMPDIR=/mnt/tmp is honoured by R
+#
+# What's intentionally NOT tested (because they're slow + orthogonal):
+#   - INLA / fmesher / sf install (12+ min)
+#   - R2 data pull (~2 min)
+#   - The actual fit_partial_pooling subprocess
+#
+# When the runner-env layer is stable for several Sundays in a row,
+# this workflow can be deleted again.
+
+on:
+  workflow_dispatch:
+
+# Distinct concurrency group so this can run alongside retrain-python.
+concurrency:
+  group: weatherprobabilistic-5a-runner-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Disk + memory baseline
+        run: |
+          echo "--- df -h / /mnt ---"
+          df -h / /mnt
+          echo "--- df -i / /mnt (inodes) ---"
+          df -i / /mnt
+          echo "--- free -h ---"
+          free -h
+          echo "--- swapon --show ---"
+          swapon --show || echo "(no swap configured at start)"
+
+      - name: Add 16 GB swap on /mnt
+        # Mirrors the production swap step in retrain-python.yml.
+        # /mnt has ~80 GB free vs / ~14 GB; swap competes with other /
+        # use if put on the root partition.
+        run: |
+          sudo swapoff -a || true
+          sudo rm -f /swapfile
+          sudo fallocate -l 16G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          echo "--- swapon --show after ---"
+          swapon --show
+          echo "--- free -h after ---"
+          free -h
+
+      - name: Create TMPDIR on /mnt
+        # Mirrors the production TMPDIR step in retrain-python.yml.
+        # /mnt is root-owned; needs sudo + chmod 1777 (sticky world-
+        # writable, /tmp-style) for the unprivileged runner user to write.
+        env:
+          TMPDIR: /mnt/tmp
+        run: |
+          sudo mkdir -p /mnt/tmp
+          sudo chmod 1777 /mnt/tmp
+          ls -ld /mnt/tmp
+          # Confirm the runner user can actually create files inside as
+          # itself (not just sudo). If this fails, R will too.
+          touch /mnt/tmp/probe && echo "write probe OK as $(whoami)" && rm /mnt/tmp/probe
+
+      - name: Install r-base-core only (skip INLA + sf stack — that's the slow part)
+        run: |
+          sudo apt-get install -y --no-install-recommends r-base-core
+          which Rscript
+          Rscript -e 'cat("R version:", R.version.string, "\n")'
+
+      - name: Verify R honours TMPDIR=/mnt/tmp
+        # If R doesn't pick up our TMPDIR, INLA's mkdir under tempdir()
+        # will end up back on / and we'll OOM the disk again. Fail loudly
+        # if so.
+        env:
+          TMPDIR: /mnt/tmp
+        run: |
+          Rscript -e '
+            d <- tempdir()
+            cat("R tempdir():", d, "\n")
+            cat("Sys.getenv(TMPDIR):", Sys.getenv("TMPDIR"), "\n")
+            stopifnot(startsWith(d, "/mnt/tmp"))
+            f <- file.path(d, "probe.rds")
+            saveRDS(list(ok = TRUE), f)
+            cat("R write probe OK:", f, "\n")
+          '
+
+      - name: Disk + memory after
+        if: always()
+        run: |
+          echo "--- df -h / /mnt ---"
+          df -h / /mnt
+          echo "--- free -h ---"
+          free -h
+          echo "--- swapon --show ---"
+          swapon --show
