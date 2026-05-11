@@ -14,14 +14,19 @@ production line. 4a is the BART blender. Both publish into the same
 `LoadModelSummaries` discovers them via the metadata directory and the
 prediction-line gating decides which is shown to the user.
 
-Output schema mirrors Phase 4a's predict_4a.py: predictions partition
-under `data/predictions/precipitation/{station_slug}/model_version=
-v{timestamp}_phase5a/date=YYYY-MM-DD/predictions.parquet` and metadata
-under `data/models/precipitation/{station_slug}/v{timestamp}_phase5a/
-{training_metadata.json, feature_schema.json}`. Columns carry the full
-posterior CI alongside the mean: ProbWet, ProbWetStd, ProbWetQ05/Q10/
-Q50/Q90/Q95, Ci80Width, Ci90Width. Plus standard 4a-shape columns:
-ModelVersion, TruthStation, PredictionMadeAtUtc, ValidTimeUtc, LeadHours.
+Output: predictions partition under `data/predictions/precipitation/
+{station_slug}/model_version=v{timestamp}_phase5a/date=YYYY-MM-DD/
+predictions.parquet`. Columns carry the full posterior CI alongside the
+mean: ProbWet, ProbWetStd, ProbWetQ05/Q10/Q50/Q90/Q95, Ci80Width,
+Ci90Width, plus standard 4a-shape columns: ModelVersion, TruthStation,
+PredictionMadeAtUtc, ValidTimeUtc, LeadHours.
+
+Metadata (training_metadata.json + feature_schema.json) is written at
+TRAIN time by extend_5a.py — same pattern as 4a's train_4a.py. This
+script reads ``Version`` + ``TrainedAtUtc`` out of the bundle's
+metadata.json and reuses them unchanged across every predict tick (so
+the per-station shadow under data/models/ stays stable for one training
+run rather than churning per-tick the way the pre-2026-05-11 code did).
 
 Run:
     .venv/Scripts/python.exe -u scripts/predict_5a.py --anchor 2026-05-07
@@ -262,95 +267,6 @@ def build_feature_frame(anchor: pd.Timestamp) -> pd.DataFrame:
     return forecasts
 
 
-def write_metadata(out_models_dir: Path, station_slug: str, station_full_name: str,
-                   version: str, feature_names: list[str], lead_hours: list[int]) -> None:
-    """Emit training_metadata.json + feature_schema.json under
-    data/models/precipitation/{station}/{version}/ so WeatherBlend's
-    LoadModelSummaries + spec page + verify pipeline pick 5a up.
-
-    Phase 5a is a *predict-time* deployment of an offline-trained
-    Bayesian posterior — there is no per-cycle test-set evaluation in
-    this flow, so PerLead carries shape-only stubs (TestRows=0,
-    BlendTestMae=NaN). The verify pipeline will populate real Brier
-    numbers later as truth lands.
-    """
-    nwp_models = list(MODELS_NO_UKMO)
-
-    per_lead = {
-        str(L): {
-            "LeadHours":   L,
-            "TestRows":    0,
-            "BlendTestMae": float("nan"),
-        }
-        for L in lead_hours
-    }
-
-    metadata = {
-        "Version":     version,
-        "Target":      "precipitation",
-        "Phase":       PHASE,
-        "DataSource":  "open_meteo + bayesian_partial_pooling",
-        "TrainedAtUtc": datetime.now(timezone.utc).isoformat(),
-        "Hyperparameters": {
-            "library":          "r-inla (via Rscript subprocess)",
-            "model":            "lead-as-feature partial-pooling Bayesian logistic regression "
-                                "with random intercepts + random slopes per (station × feature)",
-            "leadAsFeature":    True,
-            "stations":         "partial-pooled per station (varying intercept + slopes)",
-            "featureSet":       "full-21feat-rslopes (5 per-model precip + 4 precip-spread "
-                                "stats + 4 atmospheric ensemble means + 4 cyclic + lead)",
-        },
-        "DeviationsFromBrief": [
-            "Bayesian logistic regression fit via R-INLA's deterministic "
-            "Laplace approximation (replaced PyMC + blackjax NUTS 2026-05-11 "
-            "after a smoke run delivered ~1000x speedup at lower Brier). "
-            "Posterior sampled in ~36 min wall on 175k training rows; 1000 "
-            "joint samples persisted as `posteriors/lead_feature.nc` and "
-            "scored online.",
-            "Five-model precip feature set (excludes ukmo_seamless because "
-            "the lead-as-feature design conflicts with UKMO's hybrid "
-            "UKV+UM-Global lead profile).",
-            "Leads 24/48/72/96/120 pooled into a single posterior with "
-            "`lead` as a standardised feature column. At leads 96/120, "
-            "meteofrance_seamless precip is missing (OM previous_runs "
-            "archive caps mf at 72h) and median-imputed from the training "
-            "distribution; random slopes per (station × feature) absorb "
-            "the imputed-constant signal at long leads.",
-            "Predict-time evaluation only — TrainedAtUtc above is the live "
-            "predict timestamp; the actual posterior was sampled offline "
-            "and is reused unchanged across cron ticks.",
-            "PerLead.BlendTestMae is NaN here because no test slice runs "
-            "per cycle; the verify pipeline backfills real Brier numbers "
-            "as EA gauge truth lands.",
-        ],
-        "PerLead": per_lead,
-    }
-
-    schema_per_lead = {
-        str(L): {
-            "Target":         "precipitation",
-            "FeatureSet":     f"phase5a-blr-l{L:02}",
-            "LeadHours":      L,
-            "RequiredModels": [],
-            "OptionalModels": nwp_models,
-            "Models":         nwp_models,
-            "FeatureNames":   feature_names,
-            "DataSource":     "open_meteo + bayesian_partial_pooling",
-            "Tier":           "5a-blr",
-            "UkvStrategy":    None,
-        }
-        for L in lead_hours
-    }
-    schema = {"Leads": schema_per_lead}
-
-    out_models_dir.mkdir(parents=True, exist_ok=True)
-    (out_models_dir / "training_metadata.json").write_text(
-        json.dumps(metadata, indent=2, default=str))
-    (out_models_dir / "feature_schema.json").write_text(
-        json.dumps(schema, indent=2))
-    print(f"  metadata → {out_models_dir}")
-
-
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
     p.add_argument(
@@ -363,21 +279,22 @@ def main() -> None:
         default=str(WEATHERBLEND_DATA_ROOT / "predictions"),
         help="Predictions tree root.",
     )
-    p.add_argument(
-        "--models-root",
-        default=str(WEATHERBLEND_DATA_ROOT / "models"),
-        help="Models tree root for metadata files.",
-    )
     args = p.parse_args()
 
     anchor = pd.Timestamp(args.anchor, tz="UTC").normalize().tz_localize(None)
     predictions_root = Path(args.predictions_root)
-    models_root = Path(args.models_root)
-    version = datetime.now(timezone.utc).strftime("v%Y-%m-%d_%H%M%S_phase5a")
     print(f"[{time.strftime('%H:%M:%S')}] Phase 5a live Bayesian predict — anchor={anchor.date()}")
-    print(f"  version: {version}")
 
     meta = _load_metadata()
+    # Version + TrainedAtUtc are frozen at train time by extend_5a.py
+    # (2026-05-11 onwards). For bundles written before that change, fall
+    # back to a fresh predict-time stamp so predict still runs — though
+    # the resulting Models card will show the predict time as "trained"
+    # and a fresh dir per tick on R2 until the next retrain rolls through.
+    version = meta.get("Version") or datetime.now(timezone.utc).strftime(
+        "v%Y-%m-%d_%H%M%S_phase5a"
+    )
+    print(f"  version: {version}")
     feature_names: list[str] = meta["feature_names"]
     station_codes: list[str] = meta["station_codes"]
     station_full_names: list[str] = meta["station_full_names"]
@@ -437,7 +354,7 @@ def main() -> None:
     X_s = scaler.transform(X).astype("float64")
 
     rows_written = 0
-    versions_emitted = 0
+    stations_with_rows = 0
     prediction_made_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     # One posterior call per station — slice X by no condition (all rows
@@ -453,12 +370,9 @@ def main() -> None:
         # used as the partition key in WeatherBlend's predictions tree.
         station_slug, _ = resolve_station(full_name)
 
-        # Always emit metadata, even if no live rows for this station,
-        # so LoadModelSummaries surfaces the 5a phase regardless.
-        models_dir = models_root / "precipitation" / station_slug / version
-        write_metadata(models_dir, station_slug, full_name, version,
-                       feature_names, lead_hours)
-        versions_emitted += 1
+        # Per-station shadow metadata under data/models/.../v..._phase5a/
+        # is written by extend_5a.py at TRAIN time (2026-05-11 onwards) —
+        # mirrors 4a's pattern. This script only emits predictions.
 
         out = pd.DataFrame({
             "ValidTimeUtc":    forecasts["ValidTimeUtc"].values,
@@ -489,12 +403,14 @@ def main() -> None:
         out.to_parquet(out_path, index=False)
         print(f"  → {out_path}  ({len(out):,} rows, P(wet) mean {out['ProbWet'].mean():.3f})")
         rows_written += len(out)
+        stations_with_rows += 1
 
     print()
-    print(f"Phase 5a complete. Versions: {versions_emitted}, prediction rows: {rows_written:,}")
-    if versions_emitted == 0:
-        print("ERROR: no versions emitted — check posterior bundle presence.")
-        sys.exit(1)
+    print(f"Phase 5a complete. Stations with predictions: {stations_with_rows}, "
+          f"prediction rows: {rows_written:,}")
+    if rows_written == 0:
+        print("WARN: no prediction rows written across any station — "
+              "live forecast window may be empty.")
 
 
 if __name__ == "__main__":

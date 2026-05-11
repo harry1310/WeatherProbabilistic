@@ -387,11 +387,29 @@ jobs:
         run: |
           # Whole reports/phase5a_artefacts/ tree: posteriors NetCDF,
           # live_bundle (StandardScaler + metadata), test predictions.
-          # predict_5a.py reads from the same paths on R2; auto-push
-          # rotates the production posterior atomically per file.
+          # predict-5a.yml's "Pull 5a bundle from R2" step copies these
+          # back down to ./reports/phase5a_artefacts/ at every predict
+          # tick (mirrors predict-4a.yml's bundle-pull pattern).
           rclone copy ./reports/phase5a_artefacts \
             "r2:${R2_BUCKET}/reports/phase5a_artefacts" \
             --fast-list --transfers 16 --checkers 32 --s3-no-check-bucket
+
+      - name: Push 5a per-station metadata to R2
+        if: success() && steps.phases.outputs.run_5a == 'true'
+        env:
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          # Per-station training_metadata.json + feature_schema.json
+          # written by extend_5a.py to ../WeatherBlend/data/models/
+          # precipitation/{station}/v..._phase5a/. WeatherBlend's
+          # sync-render-inputs composite pulls this prefix into the
+          # render step, where LoadModelSummaries discovers 5a as a
+          # first-class phase on the Models page + Spec page + verify
+          # pipeline. Mirrors the 4a push step above.
+          rclone copy ../WeatherBlend/data/models/precipitation \
+            "r2:${R2_BUCKET}/data/models/precipitation" \
+            --fast-list --transfers 16 --checkers 32 --s3-no-check-bucket \
+            --include "**/*phase5a*/**"
 
       # ----- Workflow artefacts kept as a fallback ----------------------
       # Auto-push above is the production path, but artefact upload stays

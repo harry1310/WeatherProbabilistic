@@ -123,11 +123,12 @@ jobs:
       - name: Run Phase 5a (Bayesian logistic regression) live predict
         # Single lead-as-feature partial-pool posterior, scored against the
         # live forecast tree. One posterior call per station rather than
-        # per (station, lead). Output schema mirrors Phase 4a's predict_4a:
-        # standard predictions tree under model_version=v..._phase5a, plus
-        # per-station training_metadata.json + feature_schema.json under
-        # data/models/precipitation/{station}/v..._phase5a/ so
-        # LoadModelSummaries discovers 5a as a first-class phase.
+        # per (station, lead). Predictions land under
+        # data/predictions/precipitation/{station}/model_version=v..._phase5a/.
+        # Per-station training_metadata.json + feature_schema.json are
+        # written by extend_5a.py at TRAIN time (retrain-python.yml's
+        # "Push 5a per-station metadata to R2" step), so this script is
+        # predictions-only.
         env:
           WEATHERBLEND_DATA_ROOT: ${{ github.workspace }}/../WeatherBlend/data
         run: |
@@ -138,24 +139,17 @@ jobs:
             python -u scripts/predict_5a.py
           fi
 
-      - name: Push 5a predictions + metadata to R2
-        # Two prefixes:
-        # 1. data/predictions/precipitation/{station}/model_version=v..._phase5a/
-        #    — WeatherBlend's GetPrecipitationPredictions scanner.
-        # 2. data/models/precipitation/{station}/v..._phase5a/
-        #    — training_metadata.json + feature_schema.json so
-        #    LoadModelSummaries populates the Models card, Spec page emits
-        #    a row, and verify joins the 5a phase via phaseByVersion.
+      - name: Push 5a predictions to R2
+        # data/predictions/precipitation/{station}/model_version=v..._phase5a/
+        # is WeatherBlend's GetPrecipitationPredictions scanner prefix.
+        # data/models/.../v..._phase5a/ no longer pushed from here —
+        # extend_5a.py writes it at train time, retrain-python.yml pushes it.
         env:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
           rclone copy ../WeatherBlend/data/predictions/precipitation \
             "r2:${R2_BUCKET}/data/predictions/precipitation" \
             --include '**/model_version=*phase5a*/**' \
-            --fast-list --transfers 16 --checkers 32 --progress
-          rclone copy ../WeatherBlend/data/models/precipitation \
-            "r2:${R2_BUCKET}/data/models/precipitation" \
-            --include '**/*phase5a*/**' \
             --fast-list --transfers 16 --checkers 32 --progress
 
       - name: Upload logs as artifact
