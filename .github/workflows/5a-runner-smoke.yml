@@ -66,10 +66,44 @@ jobs:
           echo "--- swapon --show ---"
           swapon --show || echo "(no swap configured at start)"
 
+      - name: Free disk space (remove preinstalled tooling we don't need)
+        # Smoke run on 2026-05-11 surprised us: ubuntu-latest's "/" partition
+        # is 72 GB total but already 53+ GB used at baseline (the runner
+        # comes loaded with .NET SDK + Android SDK + CodeQL + Haskell GHC +
+        # Chrome / Edge). 16 GB swap on top → only ~3 GB free for INLA's
+        # source-build of sf (which needs 2-4 GB temp during compile) and
+        # R's tempdir() workspace. THIS is what was failing the Train 5a
+        # step's "Fail to create directory" — disk full, not memory.
+        #
+        # `/mnt` is NOT a separate partition on current ubuntu-latest —
+        # it's the same filesystem as `/` (same /dev/root mount). The
+        # earlier assumption that /mnt had ~80 GB free was wrong (true on
+        # older Azure-backed runners; merged in the current image). So
+        # putting the swap file on /mnt vs / makes no disk-space
+        # difference. Keep /mnt path for forward-compat in case future
+        # images split them again.
+        #
+        # Nuking the preinstalled tooling we don't need (we're a Python +
+        # R workflow; no .NET, Android, CodeQL etc.) recovers ~40-50 GB.
+        # Standard apt-cache cleanup adds another ~1 GB.
+        run: |
+          sudo rm -rf /usr/share/dotnet              || true
+          sudo rm -rf /usr/local/lib/android         || true
+          sudo rm -rf /opt/ghc                       || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL    || true
+          sudo rm -rf /opt/google/chrome             || true
+          sudo rm -rf /opt/microsoft/msedge          || true
+          sudo apt-get clean
+          echo "--- df -h after cleanup ---"
+          df -h / /mnt
+          echo "--- df -i after cleanup ---"
+          df -i / /mnt
+
       - name: Add 16 GB swap on /mnt
-        # Mirrors the production swap step in retrain-python.yml.
-        # /mnt has ~80 GB free vs / ~14 GB; swap competes with other /
-        # use if put on the root partition.
+        # Mirrors the production swap step in retrain-python.yml. /mnt is
+        # the same filesystem as / on current ubuntu-latest, but we keep
+        # the path consistent so the steps are mechanically identical to
+        # what production runs.
         run: |
           sudo swapoff -a || true
           sudo rm -f /swapfile
@@ -81,6 +115,8 @@ jobs:
           swapon --show
           echo "--- free -h after ---"
           free -h
+          echo "--- df -h after swap allocation ---"
+          df -h / /mnt
 
       - name: Create TMPDIR on /mnt
         # Mirrors the production TMPDIR step in retrain-python.yml.
