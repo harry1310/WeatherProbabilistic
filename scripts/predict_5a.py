@@ -76,6 +76,11 @@ POSTERIOR_DIR = ROOT / "reports" / "phase5a_artefacts" / "posteriors"
 QUANTILES = (0.05, 0.10, 0.50, 0.90, 0.95)
 PHASE = "5a"
 
+# Phase A multi-location safety (2026-05-12). Active NWP location for
+# this predict invocation; the live-bundle metadata.LocationName must
+# match (or be empty for legacy bundles).
+ACTIVE_LOCATION = os.environ.get("WB_LOCATION", LOCATION)
+
 
 def _load_metadata() -> dict:
     meta_path = LIVE_BUNDLE_DIR / "metadata.json"
@@ -84,7 +89,24 @@ def _load_metadata() -> dict:
             f"Live bundle not found at {meta_path}. "
             f"Run scripts/extend_5a.py first."
         )
-    return json.loads(meta_path.read_text())
+    meta = json.loads(meta_path.read_text())
+    # Phase A multi-location safety (2026-05-12): refuse to score the
+    # bundle if its pinned LocationName disagrees with the active NWP
+    # source. Legacy bundles (no LocationName) get a one-shot warning
+    # + fallback so the production train cycle isn't broken mid-rollout.
+    bundle_loc = (meta.get("LocationName") or "").strip()
+    if not bundle_loc:
+        print(f"  WARN live 5a bundle has no LocationName pinned (legacy, "
+              f"predates 2026-05-12 backfill). Proceeding under active "
+              f"location '{ACTIVE_LOCATION}'.", flush=True)
+    elif bundle_loc.lower() != ACTIVE_LOCATION.lower():
+        raise ValueError(
+            f"Live 5a bundle was trained on location '{bundle_loc}' but "
+            f"predict is using NWP from '{ACTIVE_LOCATION}' — refusing to "
+            f"score. Set WB_LOCATION={bundle_loc} or rerun extend_5a.py "
+            f"with the right location."
+        )
+    return meta
 
 
 def _load_scaler():
@@ -115,7 +137,7 @@ def _load_one_model_live_runs(model: str, window_dates: list[pd.Timestamp]) -> p
     bundle's lead-as-feature design means leads outside the training
     set (e.g. 144h, 168h) score correctly given the standardised lead
     column the scaler applies."""
-    model_dir = WEATHERBLEND_DATA_ROOT / "forecasts" / f"location={LOCATION}" / f"model={model}"
+    model_dir = WEATHERBLEND_DATA_ROOT / "forecasts" / f"location={ACTIVE_LOCATION}" / f"model={model}"
     cols = [
         "RunTimeUtc", "ValidTimeUtc", "LeadHours",
         "Precipitation",
@@ -386,7 +408,7 @@ def main() -> None:
             "ProbWetQ95":      summary["q0.95"],
             "Ci80Width":       summary["q0.9"] - summary["q0.1"],
             "Ci90Width":       summary["q0.95"] - summary["q0.05"],
-            "LocationName":    LOCATION,
+            "LocationName":    ACTIVE_LOCATION,
             "ModelVersion":    version,
             "TruthStation":    station_slug,
             "PredictionMadeAtUtc": prediction_made_at,

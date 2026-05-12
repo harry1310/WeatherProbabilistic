@@ -67,6 +67,11 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from src.data import LOCATION, WEATHERBLEND_DATA_ROOT, WET_THRESHOLD_MM  # noqa: E402
 
+# Phase A multi-location safety (2026-05-12). Active NWP location for this
+# predict invocation. WB_LOCATION env var overrides the legacy default; we
+# refuse to score any bundle whose training_metadata.LocationName disagrees.
+ACTIVE_LOCATION = os.environ.get("WB_LOCATION", LOCATION)
+
 from _shared import (  # noqa: E402
     MODELS_LEAN,
     resolve_station,
@@ -151,7 +156,7 @@ def build_live_features(station_friendly: str, anchor: datetime) -> pd.DataFrame
                ROW_NUMBER() OVER (PARTITION BY ValidTimeUtc, Model, LeadHours
                                   ORDER BY RunTimeUtc DESC) AS rn
         FROM read_parquet('{fc_glob}', hive_partitioning = false, union_by_name = true)
-        WHERE LocationName = '{LOCATION}'
+        WHERE LocationName = '{ACTIVE_LOCATION}'
           AND RunTimeSource = 'reported'
           AND LeadHours IN {leads_in}
           AND Model IN {model_in}
@@ -279,6 +284,29 @@ def predict_one_cell(bundle_dir: Path, lead: int, df_lead: pd.DataFrame,
 
 def predict_one_station(bundle_dir: Path, station_friendly: str,
                         anchor: datetime) -> pd.DataFrame:
+    # Phase A multi-location safety: refuse to score the bundle if its
+    # pinned LocationName disagrees with the active NWP source. Legacy
+    # bundles (no LocationName) get a one-shot warning + fallback.
+    meta_path = bundle_dir / "training_metadata.json"
+    if meta_path.exists():
+        meta = json.loads(meta_path.read_text())
+        bundle_loc = (meta.get("LocationName") or "").strip()
+        if not bundle_loc:
+            print(f"  WARN bundle {bundle_dir.name} has no LocationName pinned "
+                  f"(legacy, predates 2026-05-12 backfill). "
+                  f"Proceeding under active location '{ACTIVE_LOCATION}'.",
+                  flush=True)
+        elif bundle_loc.lower() != ACTIVE_LOCATION.lower():
+            raise ValueError(
+                f"Bundle {bundle_dir.name} was trained on location "
+                f"'{bundle_loc}' but predict is using NWP from "
+                f"'{ACTIVE_LOCATION}' — refusing to score. Set "
+                f"WB_LOCATION={bundle_loc} or fix the manifest entry.")
+    else:
+        print(f"  WARN bundle {bundle_dir.name} has no training_metadata.json "
+              f"(unexpected for 4a) — proceeding without location check.",
+              flush=True)
+
     preprocess = json.loads((bundle_dir / "preprocess.json").read_text())
     if "per_lead" not in preprocess:
         raise ValueError(
@@ -333,7 +361,7 @@ def write_predictions_parquet(predictions_root: Path, station_slug: str,
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "predictions.parquet"
     predictions = predictions.copy()
-    predictions["LocationName"]        = LOCATION
+    predictions["LocationName"]        = ACTIVE_LOCATION
     predictions["ModelVersion"]        = bundle_name
     predictions["TruthStation"]        = station_slug
     predictions["PredictionMadeAtUtc"] = datetime.now(timezone.utc)
