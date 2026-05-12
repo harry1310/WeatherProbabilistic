@@ -82,6 +82,14 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from src.data import LOCATION, WEATHERBLEND_DATA_ROOT  # noqa: E402
+
+# Location whose NWP fed the training data — pinned in metadata so the
+# .NET predict (PrecipPredictCommand) and python predict_4a both refuse
+# to score the bundle against any other location's NWP. Defaults to the
+# legacy `LOCATION` constant for back-compat; future Membury 4a will
+# override via WB_LOCATION env var (set by retrain-python.yml when it
+# fans out per location). Phase A multi-location safety, 2026-05-12.
+ACTIVE_LOCATION = os.environ.get("WB_LOCATION", LOCATION)
 from src.retrain_guard import build_check_and_save_versioned  # noqa: E402
 
 from _shared import (  # noqa: E402
@@ -320,6 +328,7 @@ def write_per_cell_bundle(out_dir: Path, station_slug: str, station_friendly: st
         "Version":      version,
         "Target":       "precipitation",
         "Phase":        PHASE,
+        "LocationName": ACTIVE_LOCATION,
         "DataSource":   "open_meteo_previous_runs+ea_rainfall+dbarts_bart_per_cell",
         "TrainedAtUtc": datetime.now(timezone.utc).isoformat(),
         "Hyperparameters": {
@@ -449,6 +458,7 @@ def main() -> None:
             train_features=result["train_features"],
             feature_names=result["feature_names"],
             label_rates={station_slug: float(np.mean(y_train))} if len(y_train) else {},
+            location_name=ACTIVE_LOCATION,
         )
         if not guard_result.passed:
             print(f"  guard FAIL — skipping bundle for {station_slug}.")

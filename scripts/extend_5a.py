@@ -47,11 +47,18 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import arviz as az  # noqa: E402
 
 from src.data import (  # noqa: E402
+    LOCATION,
     MODELS_NO_UKMO,
     PHASE5A_LEAD_HOURS,
     WEATHERBLEND_DATA_ROOT,
     prepare_phase3_dataset,
 )
+
+# Location whose NWP fed the training data — pinned in metadata so
+# predict refuses to score against the wrong NWP. WB_LOCATION env var
+# overrides the legacy `LOCATION` default for future Membury-side 5a
+# (not yet trained). Phase A multi-location safety, 2026-05-12.
+ACTIVE_LOCATION = os.environ.get("WB_LOCATION", LOCATION)
 from src.models.phase2_partial_pooling import (  # noqa: E402
     PartialPoolingFit, predict_partial_pooling_summary,
 )
@@ -96,6 +103,7 @@ def save_live_bundle(ds, version: str, trained_at_utc: str) -> None:
 
     metadata = {
         "Version": version,
+        "LocationName": ACTIVE_LOCATION,
         "TrainedAtUtc": trained_at_utc,
         "phase": "5a",
         "feature_names": list(ds.feature_names),
@@ -119,7 +127,7 @@ def save_live_bundle(ds, version: str, trained_at_utc: str) -> None:
           f"scale={ds.scaler.scale_[lead_feature_index]:.3f})")
 
 
-def write_per_station_metadata(models_root: Path, ds, version: str, trained_at_utc: str) -> int:
+def write_per_station_metadata(models_root: Path, ds, version: str, trained_at_utc: str, location_name: str) -> int:
     """Write training_metadata.json + feature_schema.json under
     ``models_root/precipitation/{station}/{version}/`` — one shadow per
     station so WeatherBlend's LoadModelSummaries + spec page + verify
@@ -152,6 +160,7 @@ def write_per_station_metadata(models_root: Path, ds, version: str, trained_at_u
         "Version":     version,
         "Target":      "precipitation",
         "Phase":       PHASE,
+        "LocationName": location_name,
         "DataSource":  "open_meteo + bayesian_partial_pooling",
         "TrainedAtUtc": trained_at_utc,
         "Hyperparameters": {
@@ -283,6 +292,7 @@ def main() -> None:
     models_root = WEATHERBLEND_DATA_ROOT / "models"
     n_shadows = write_per_station_metadata(
         models_root, ds, version=version, trained_at_utc=trained_at_utc,
+        location_name=ACTIVE_LOCATION,
     )
     print(f"  {n_shadows} per-station shadow metadata files written under "
           f"{models_root / 'precipitation'}")

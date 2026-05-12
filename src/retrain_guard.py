@@ -110,6 +110,32 @@ def check(
 
     breaches: list[GuardBreach] = []
 
+    # LocationName: must not have changed between runs. The catastrophic
+    # Phase A scenario is a Membury bundle accidentally written into
+    # Bonehill's manifest slot (or vice versa); the guard refuses the
+    # write so it can never promote. Both unset → legacy pair, no info to
+    # compare. Only one side present → backfill landing or first pinned
+    # write — pass with no breach. Both present and different → hard fail.
+    if (
+        current.LocationName
+        and previous.LocationName
+        and current.LocationName.lower() != previous.LocationName.lower()
+    ):
+        breaches.append(GuardBreach(
+            field="locationName",
+            previous=previous.LocationName,
+            current=current.LocationName,
+            threshold="must not change",
+            reason=(
+                f"LocationName changed from '{previous.LocationName}' to "
+                f"'{current.LocationName}' for the same composite — "
+                "refusing to overwrite. Either you've accidentally pointed "
+                "this trainer at the wrong location's NWP, or the manifest "
+                "entry is in the wrong location's slot. Investigate before "
+                "forcing through."
+            ),
+        ))
+
     # Row counts: relative ±rows_delta_pct. Skip on zero baseline.
     _check_relative("rowsTrain", previous.RowsTrain, current.RowsTrain,
                     tolerances.rows_delta_pct, breaches)
@@ -278,6 +304,10 @@ def build_check_and_save_versioned(
     feature_names: list[str],
     label_rates: dict[str, float] | None = None,
     tolerances: GuardTolerances = DEFAULTS,
+    # Configured location whose NWP fed the training data — pinned at
+    # train time. Optional during the trainer-side rollout; once every
+    # caller threads it through, the schema gates it as required.
+    location_name: str | None = None,
 ) -> GuardResult:
     """Versioned-bundle entry point (4a). Builds the summary, finds the
     previous in the parent dir, runs the guard, and on pass writes the
@@ -297,6 +327,7 @@ def build_check_and_save_versioned(
         rows_train=rows_train, rows_val=rows_val, rows_test=rows_test,
         train_features=train_features, feature_names=feature_names,
         label_rates=label_rates, tolerances=tolerances,
+        location_name=location_name,
     )
 
 
@@ -313,6 +344,7 @@ def build_check_and_save_singleton(
     feature_names: list[str],
     label_rates: dict[str, float] | None = None,
     tolerances: GuardTolerances = DEFAULTS,
+    location_name: str | None = None,
 ) -> GuardResult:
     """Singleton-bundle entry point (5a). Loads the existing summary at
     ``summary_path`` as the "previous" baseline, runs the guard, and on
@@ -329,6 +361,7 @@ def build_check_and_save_singleton(
         rows_train=rows_train, rows_val=rows_val, rows_test=rows_test,
         train_features=train_features, feature_names=feature_names,
         label_rates=label_rates, tolerances=tolerances,
+        location_name=location_name,
     )
 
 
@@ -346,6 +379,7 @@ def _run_guard(
     feature_names: list[str],
     label_rates: dict[str, float] | None,
     tolerances: GuardTolerances,
+    location_name: str | None = None,
 ) -> GuardResult:
     """Shared body. Builds → checks → saves on pass / preserves on fail."""
     if train_features is None or len(train_features) == 0 or len(feature_names) == 0:
@@ -364,6 +398,7 @@ def _run_guard(
         rows_train=rows_train, rows_val=rows_val, rows_test=rows_test,
         train_features=train_features, feature_names=feature_names,
         label_rates=label_rates,
+        location_name=location_name,
     )
 
     result = check(summary, previous, tolerances)

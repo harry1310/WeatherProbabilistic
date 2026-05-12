@@ -61,7 +61,12 @@ sys.path.insert(0, str(ROOT))
 
 import arviz as az  # noqa: E402
 
-from src.data import MODELS_NO_UKMO, PHASE5A_LEAD_HOURS, prepare_phase3_dataset  # noqa: E402
+from src.data import LOCATION, MODELS_NO_UKMO, PHASE5A_LEAD_HOURS, prepare_phase3_dataset  # noqa: E402
+
+# Phase A multi-location safety: pin the location whose NWP fed this
+# guard's training summary. WB_LOCATION env var lets a future Membury
+# 5a override the legacy default. 2026-05-12.
+ACTIVE_LOCATION = os.environ.get("WB_LOCATION", LOCATION)
 from src.retrain_guard import build_check_and_save_singleton  # noqa: E402
 # Engine: INLA backend (random-intercept-only hierarchical logreg via
 # R-INLA) replaced PyMC + blackjax NUTS on 2026-05-11. Smoke validated
@@ -167,6 +172,7 @@ def main() -> None:
         train_features=ds.X_train_s,
         feature_names=list(ds.feature_names),
         label_rates=label_rates,
+        location_name=ACTIVE_LOCATION,
     )
     if not guard_result.passed:
         print("Phase 5a guard FAIL — skipping sample. Existing posterior + bundle stay live.")

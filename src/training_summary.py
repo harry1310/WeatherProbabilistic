@@ -60,6 +60,11 @@ class TrainingSummary:
     Composite: str = ""
     Phase: str = ""
     Version: str = ""
+    # Configured location whose NWP fed the training data (Phase A
+    # multi-location safety, 2026-05-12). Mirrors the .NET TrainingSummary
+    # field. None during the backfill window for legacy summaries; once
+    # every retrain writes it, the schema gates it as required.
+    LocationName: str | None = None
     # ISO 8601 UTC string; matches the .NET DateTime serialisation
     # convention (which uses "yyyy-MM-ddTHH:mm:ss.fffffffZ"). We use
     # microsecond precision since Python's datetime is limited to that.
@@ -130,6 +135,12 @@ def build_summary(
     feature_names: list[str],
     label_rates: Mapping[str, float] | None = None,
     computed_at_utc: datetime | None = None,
+    # Configured location whose NWP fed the training data; pinned at train
+    # time so the guard can refuse a retrain that swapped the location
+    # underneath the manifest slot (Phase A safety, 2026-05-12). Optional
+    # during the backfill window — None means "legacy summary, location
+    # unknown" and the guard skips the LocationName check with a note.
+    location_name: str | None = None,
 ) -> TrainingSummary:
     """Compose a complete TrainingSummary. Convenience wrapper that ties
     the per-feature stats to the metadata fields. Caller is responsible
@@ -142,6 +153,7 @@ def build_summary(
         Composite=composite,
         Phase=phase,
         Version=version,
+        LocationName=location_name,
         ComputedAtUtc=when.isoformat(),
         RowsTrain=rows_train,
         RowsVal=rows_val,
