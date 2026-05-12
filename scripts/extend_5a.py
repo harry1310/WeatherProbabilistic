@@ -287,6 +287,25 @@ def main() -> None:
     print(f"  {n_shadows} per-station shadow metadata files written under "
           f"{models_root / 'precipitation'}")
 
+    # Promote into MANIFEST.json's Active. Mirrors train_4a's promote
+    # call (added 2026-05-12 — same "no 4a on the site" symptom would
+    # have hit 5a sooner or later if it weren't already exempt from the
+    # Models-card filtering by role=confidence). Belt-and-braces: keep
+    # 5a's version visible in Active so verify/spec/admin tooling
+    # discovers it consistently. Phase tag = "phase5a".
+    from src.manifest_promote import promote_station_version
+    for full_name in ds.station_full_names:
+        station_slug, _ = resolve_station(full_name)
+        new_active = promote_station_version(
+            models_root=models_root,
+            target="precipitation",
+            station_slug=station_slug,
+            version=version,
+            phase_tag="phase5a",
+            role="challenger",
+        )
+        print(f"  promoted into manifest → {station_slug} Active = {new_active['Active']}")
+
     print(f"[{time.strftime('%H:%M:%S')}] Loading saved posterior from {POSTERIOR_DIR}")
     fit = load_fit_from_disk(ds.feature_names, ds.station_codes)
 

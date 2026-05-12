@@ -462,6 +462,25 @@ def main() -> None:
         write_per_cell_bundle(bundle_dir, station_slug, station_friendly, version, result, anchor)
         bundles_written += 1
 
+        # Promote into MANIFEST.json's Active so the site renders this
+        # version. Pre-2026-05-12 train_4a never touched the manifest;
+        # symptom was "no 4a on the site since midday May 10" because
+        # the per-cell refactor minted a new bundle name and nothing
+        # promoted it. Phase tag = "phase4a" — same string the bundle
+        # dir is suffixed with — so the helper strips prior phase4a
+        # entries before appending this version (idempotent across
+        # re-runs).
+        from src.manifest_promote import promote_station_version
+        new_active = promote_station_version(
+            models_root=models_root,
+            target="precipitation",
+            station_slug=station_slug,
+            version=version,
+            phase_tag="phase4a",
+            role="challenger",
+        )
+        print(f"  promoted into manifest → station Active = {new_active['Active']}")
+
         # Free R-side fits before the next station — peak RAM scales
         # linearly otherwise (5 BARTs × 14k rows × keeptrees=TRUE).
         for lead in LEADS:

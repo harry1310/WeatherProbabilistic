@@ -375,6 +375,16 @@ jobs:
           rclone copy "r2:${R2_BUCKET}/data/truth/rainfall" \
             ../WeatherBlend/data/truth/rainfall \
             --fast-list --transfers 16 --checkers 32
+          # Pull MANIFEST.json so train_4a + extend_5a can promote the
+          # new versions into the EXISTING Active list rather than
+          # starting from a blank manifest. Without this, the promote
+          # helper would mint a fresh manifest with only the freshly
+          # trained version's station entries — clobbering the .NET
+          # phases' Bonehill entries on the next push. Critical.
+          mkdir -p ../WeatherBlend/data/models/precipitation
+          rclone copyto "r2:${R2_BUCKET}/data/models/precipitation/MANIFEST.json" \
+            ../WeatherBlend/data/models/precipitation/MANIFEST.json \
+            --s3-no-check-bucket || echo "::warning::No MANIFEST.json on R2 yet — promote will create one."
 
       - name: Train 4a (BART, per-cell)
         # 3 stations × 5 leads = 15 BART fits per run, ~5-8 min each
@@ -515,6 +525,28 @@ jobs:
             "r2:${R2_BUCKET}/data/models/precipitation" \
             --fast-list --transfers 16 --checkers 32 --s3-no-check-bucket \
             --include "**/*phase5a*/**"
+
+      - name: Push MANIFEST.json to R2
+        # train_4a.py + extend_5a.py promote the freshly-trained version
+        # into the local MANIFEST.json's Active list (added 2026-05-12 —
+        # see manifest_promote.py module docstring for why; root-cause was
+        # "no 4a on site since midday May 10" symptom). The 4a + 5a
+        # bundle-push steps above use --include filters scoped to phase
+        # subtrees, so MANIFEST.json (at the precipitation root) wouldn't
+        # be picked up by either. This step does the explicit manifest
+        # push. No --include because we want exactly this one file.
+        if: success() && (steps.phases.outputs.run_4a == 'true' || steps.phases.outputs.run_5a == 'true')
+        env:
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          if [ -f ../WeatherBlend/data/models/precipitation/MANIFEST.json ]; then
+            rclone copyto ../WeatherBlend/data/models/precipitation/MANIFEST.json \
+              "r2:${R2_BUCKET}/data/models/precipitation/MANIFEST.json" \
+              --s3-no-check-bucket
+            echo "Pushed MANIFEST.json to R2."
+          else
+            echo "::warning::MANIFEST.json not found locally — train must have failed before promote step ran."
+          fi
 
       # ----- Workflow artefacts kept as a fallback ----------------------
       # Auto-push above is the production path, but artefact upload stays
