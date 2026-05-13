@@ -2,9 +2,11 @@ pymc>=5.25
 arviz>=0.23
 # arviz advertises netcdf4/h5netcdf as IO backends but doesn't hard-depend
 # on either; without one of them installed `az.from_netcdf` raises at runtime.
-# Pin h5netcdf (pure-Python, no native compile) so predict_5a + retrain
-# always have a working backend for the posterior NetCDF bundle.
+# Pin h5netcdf (the Python wrapper) + h5py (the HDF5 bindings it relies on).
+# h5py ships with bundled HDF5 in its manylinux wheel, so no apt install
+# needed on CI. Pure-Python h5netcdf on top.
 h5netcdf>=1.0
+h5py>=3.10
 pandas>=2.0
 pyarrow>=15
 numpy>=1.26
