@@ -508,6 +508,7 @@ jobs:
             --include "**/*phase4a*/**"
 
       - name: Push 5a bundle to R2
+        id: push_5a
         if: steps.phases.outputs.run_5a == 'true' && steps.train_5a.outcome == 'success'
         env:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
@@ -590,7 +591,15 @@ jobs:
       # to a staging dir inside the workspace first — not worth it.
 
       - name: Upload 5a artefacts (fallback)
-        if: always() && steps.phases.outputs.run_5a == 'true'
+        # Genuine fallback: only upload when the R2 push did NOT succeed
+        # (push failed, or 5a training failed so the push was skipped).
+        # On a healthy run the bundle is already on R2, and uploading it
+        # as an artifact every time just burns the Actions storage quota
+        # — that quota being exhausted is what red-X'd an otherwise green
+        # retrain on 2026-05-17. continue-on-error so a failed fallback
+        # upload (e.g. quota full) never decides the job's conclusion.
+        if: always() && steps.phases.outputs.run_5a == 'true' && steps.push_5a.outcome != 'success'
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: retrain-5a-${{ github.run_id }}
