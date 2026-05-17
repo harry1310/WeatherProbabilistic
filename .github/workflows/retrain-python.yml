@@ -391,7 +391,13 @@ jobs:
         # on a 4-vCPU runner. Total wall: ~75-120 min. Per-cell
         # architecture replaced the lead-pooled 4a 2026-05-11 (see
         # train_4a.py module docstring).
+        id: train_4a
         if: steps.gate.outputs.proceed == 'true' && steps.phases.outputs.run_4a == 'true'
+        # continue-on-error so a 4a failure doesn't abort the job before
+        # 5a runs, and a 5a failure doesn't strand 4a's good bundle. Each
+        # push step gates on its own phase's outcome; the aggregator at
+        # the end re-fails the job if either phase broke.
+        continue-on-error: true
         env:
           WEATHERBLEND_DATA_ROOT: ${{ github.workspace }}/../WeatherBlend/data
           R_HOME: /usr/lib/R
@@ -435,7 +441,11 @@ jobs:
           free -h
 
       - name: Train 5a (Bayesian logreg)
+        id: train_5a
         if: steps.gate.outputs.proceed == 'true' && steps.phases.outputs.run_5a == 'true'
+        # continue-on-error: a 5a failure must not skip the 4a push (4a
+        # already trained). The aggregator step re-fails the job.
+        continue-on-error: true
         env:
           WEATHERBLEND_DATA_ROOT: ${{ github.workspace }}/../WeatherBlend/data
           R_LIBS_USER: /home/runner/R/x86_64-pc-linux-gnu-library/4.4
@@ -486,7 +496,9 @@ jobs:
       # prediction tick.
 
       - name: Push 4a bundles to R2
-        if: success() && steps.phases.outputs.run_4a == 'true'
+        # Gated on 4a's OWN outcome, not job-wide success() — a failed 5a
+        # must not strand 4a's freshly-trained bundles.
+        if: steps.phases.outputs.run_4a == 'true' && steps.train_4a.outcome == 'success'
         env:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
@@ -496,7 +508,7 @@ jobs:
             --include "**/*phase4a*/**"
 
       - name: Push 5a bundle to R2
-        if: success() && steps.phases.outputs.run_5a == 'true'
+        if: steps.phases.outputs.run_5a == 'true' && steps.train_5a.outcome == 'success'
         env:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
@@ -510,7 +522,7 @@ jobs:
             --fast-list --transfers 16 --checkers 32 --s3-no-check-bucket
 
       - name: Push 5a per-station metadata to R2
-        if: success() && steps.phases.outputs.run_5a == 'true'
+        if: steps.phases.outputs.run_5a == 'true' && steps.train_5a.outcome == 'success'
         env:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
@@ -535,7 +547,7 @@ jobs:
         # subtrees, so MANIFEST.json (at the precipitation root) wouldn't
         # be picked up by either. This step does the explicit manifest
         # push. No --include because we want exactly this one file.
-        if: success() && (steps.phases.outputs.run_4a == 'true' || steps.phases.outputs.run_5a == 'true')
+        if: (steps.phases.outputs.run_4a == 'true' && steps.train_4a.outcome == 'success') || (steps.phases.outputs.run_5a == 'true' && steps.train_5a.outcome == 'success')
         env:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
@@ -547,6 +559,22 @@ jobs:
           else
             echo "::warning::MANIFEST.json not found locally — train must have failed before promote step ran."
           fi
+
+      - name: Aggregate retrain results
+        # The train steps are continue-on-error so the push steps can
+        # decouple (a failed 5a no longer strands a good 4a). This step
+        # re-fails the job — so the [ci-fail] webhook still fires — if any
+        # phase actually broke. Skipped phases (outcome=skipped) don't count.
+        if: always() && steps.gate.outputs.proceed == 'true'
+        run: |
+          failed=()
+          if [ "${{ steps.train_4a.outcome }}" = "failure" ]; then failed+=("4a"); fi
+          if [ "${{ steps.train_5a.outcome }}" = "failure" ]; then failed+=("5a"); fi
+          if [ ${#failed[@]} -gt 0 ]; then
+            echo "::error::Retrain failed for phase(s): ${failed[*]}. Passing phases were still pushed to R2 — inspect each failed phase's log above."
+            exit 1
+          fi
+          echo "All requested phases trained + pushed."
 
       # ----- Workflow artefacts kept as a fallback ----------------------
       # Auto-push above is the production path, but artefact upload stays
