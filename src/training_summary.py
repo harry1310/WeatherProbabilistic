@@ -62,9 +62,11 @@ class TrainingSummary:
     Version: str = ""
     # Configured location whose NWP fed the training data (Phase A
     # multi-location safety, 2026-05-12). Mirrors the .NET TrainingSummary
-    # field. None during the backfill window for legacy summaries; once
-    # every retrain writes it, the schema gates it as required.
-    LocationName: str | None = None
+    # field — required post-backfill. ``from_json`` raises on a JSON file
+    # that lacks the field; the in-memory default of "" is for fixtures /
+    # legacy callers that build summaries by hand without it, which the
+    # guard's same-empty check tolerates without flagging a breach.
+    LocationName: str = ""
     # ISO 8601 UTC string; matches the .NET DateTime serialisation
     # convention (which uses "yyyy-MM-ddTHH:mm:ss.fffffffZ"). We use
     # microsecond precision since Python's datetime is limited to that.
@@ -189,6 +191,16 @@ def _to_dict(summary: TrainingSummary) -> dict:
 
 
 def _from_dict(raw: dict) -> TrainingSummary:
+    # Phase A tightening (Task #21): LocationName is required at load time.
+    # A summary on disk without it is a corrupt/incomplete write — refusing
+    # to load is loud and obvious, vs the warn-then-fallback path which
+    # silently let pre-backfill bundles through.
+    if "LocationName" not in raw or not str(raw.get("LocationName") or "").strip():
+        raise ValueError(
+            "training_summary.json missing required field 'LocationName' — "
+            "every summary written post-2026-05-12 backfill carries it. "
+            "Drop the file and let the next retrain produce a fresh baseline.",
+        )
     per_feature = {
         k: FeatureStats(
             NanPct=v.get("NanPct", 0.0),
@@ -204,6 +216,7 @@ def _from_dict(raw: dict) -> TrainingSummary:
         Composite=raw.get("Composite", ""),
         Phase=raw.get("Phase", ""),
         Version=raw.get("Version", ""),
+        LocationName=raw["LocationName"],
         ComputedAtUtc=raw.get("ComputedAtUtc", ""),
         RowsTrain=raw.get("RowsTrain", 0),
         RowsVal=raw.get("RowsVal", 0),

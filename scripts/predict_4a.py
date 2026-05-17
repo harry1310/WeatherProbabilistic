@@ -285,27 +285,27 @@ def predict_one_cell(bundle_dir: Path, lead: int, df_lead: pd.DataFrame,
 def predict_one_station(bundle_dir: Path, station_friendly: str,
                         anchor: datetime) -> pd.DataFrame:
     # Phase A multi-location safety: refuse to score the bundle if its
-    # pinned LocationName disagrees with the active NWP source. Legacy
-    # bundles (no LocationName) get a one-shot warning + fallback.
+    # pinned LocationName disagrees with the active NWP source. Post Task
+    # #21 the bundle MUST carry LocationName — missing field or file is a
+    # corrupt write and we hard-fail rather than fall back.
     meta_path = bundle_dir / "training_metadata.json"
-    if meta_path.exists():
-        meta = json.loads(meta_path.read_text())
-        bundle_loc = (meta.get("LocationName") or "").strip()
-        if not bundle_loc:
-            print(f"  WARN bundle {bundle_dir.name} has no LocationName pinned "
-                  f"(legacy, predates 2026-05-12 backfill). "
-                  f"Proceeding under active location '{ACTIVE_LOCATION}'.",
-                  flush=True)
-        elif bundle_loc.lower() != ACTIVE_LOCATION.lower():
-            raise ValueError(
-                f"Bundle {bundle_dir.name} was trained on location "
-                f"'{bundle_loc}' but predict is using NWP from "
-                f"'{ACTIVE_LOCATION}' — refusing to score. Set "
-                f"WB_LOCATION={bundle_loc} or fix the manifest entry.")
-    else:
-        print(f"  WARN bundle {bundle_dir.name} has no training_metadata.json "
-              f"(unexpected for 4a) — proceeding without location check.",
-              flush=True)
+    if not meta_path.exists():
+        raise FileNotFoundError(
+            f"Bundle {bundle_dir.name} has no training_metadata.json "
+            f"(required for 4a since 2026-05-12).")
+    meta = json.loads(meta_path.read_text())
+    bundle_loc = (meta.get("LocationName") or "").strip()
+    if not bundle_loc:
+        raise ValueError(
+            f"Bundle {bundle_dir.name} has no LocationName pinned in "
+            f"training_metadata.json — required since the 2026-05-12 "
+            f"backfill. Retrain to repair.")
+    if bundle_loc.lower() != ACTIVE_LOCATION.lower():
+        raise ValueError(
+            f"Bundle {bundle_dir.name} was trained on location "
+            f"'{bundle_loc}' but predict is using NWP from "
+            f"'{ACTIVE_LOCATION}' — refusing to score. Set "
+            f"WB_LOCATION={bundle_loc} or fix the manifest entry.")
 
     preprocess = json.loads((bundle_dir / "preprocess.json").read_text())
     if "per_lead" not in preprocess:

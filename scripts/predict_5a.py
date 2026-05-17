@@ -90,16 +90,15 @@ def _load_metadata() -> dict:
             f"Run scripts/extend_5a.py first."
         )
     meta = json.loads(meta_path.read_text())
-    # Phase A multi-location safety (2026-05-12): refuse to score the
-    # bundle if its pinned LocationName disagrees with the active NWP
-    # source. Legacy bundles (no LocationName) get a one-shot warning
-    # + fallback so the production train cycle isn't broken mid-rollout.
+    # Phase A tightening (Task #21): LocationName is required. A missing
+    # field is a corrupt/incomplete bundle — hard-fail rather than fall back.
     bundle_loc = (meta.get("LocationName") or "").strip()
     if not bundle_loc:
-        print(f"  WARN live 5a bundle has no LocationName pinned (legacy, "
-              f"predates 2026-05-12 backfill). Proceeding under active "
-              f"location '{ACTIVE_LOCATION}'.", flush=True)
-    elif bundle_loc.lower() != ACTIVE_LOCATION.lower():
+        raise ValueError(
+            "Live 5a bundle has no LocationName pinned in metadata.json — "
+            "required since the 2026-05-12 backfill. Rerun extend_5a.py."
+        )
+    if bundle_loc.lower() != ACTIVE_LOCATION.lower():
         raise ValueError(
             f"Live 5a bundle was trained on location '{bundle_loc}' but "
             f"predict is using NWP from '{ACTIVE_LOCATION}' — refusing to "

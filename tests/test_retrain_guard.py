@@ -191,6 +191,7 @@ def test_build_check_and_save_versioned_writes_summary_when_no_previous(tmp_path
         composite="precipitation/ea_test", phase="4a", version="v-current",
         rows_train=100, rows_val=20, rows_test=20,
         train_features=X, feature_names=["a", "b", "c"],
+        location_name="bonehill_rocks",
     )
     assert result.passed
     assert "First-ever train" in result.note
@@ -213,6 +214,7 @@ def test_build_check_and_save_versioned_finds_previous_in_sibling_dir(tmp_path):
         rows_train=10_000, rows_val=2_000, rows_test=2_000,
         train_features=_make_features(100, 3),
         feature_names=["a", "b", "c"],
+        location_name="bonehill_rocks",
     )
     to_json(prev_summary, prev_dir / "training_summary.json")
 
@@ -226,6 +228,7 @@ def test_build_check_and_save_versioned_finds_previous_in_sibling_dir(tmp_path):
         rows_train=10_500, rows_val=1_950, rows_test=2_050,
         train_features=_make_features(100, 3),
         feature_names=["a", "b", "c"],
+        location_name="bonehill_rocks",
     )
     assert result.passed
     assert (new_dir / "training_summary.json").exists()
@@ -244,6 +247,7 @@ def test_build_check_and_save_versioned_does_not_write_on_fail(tmp_path):
         rows_train=10_000, rows_val=2_000, rows_test=2_000,
         train_features=_make_features(100, 3),
         feature_names=["a", "b", "c"],
+        location_name="bonehill_rocks",
     )
     to_json(prev_summary, prev_dir / "training_summary.json")
 
@@ -257,6 +261,7 @@ def test_build_check_and_save_versioned_does_not_write_on_fail(tmp_path):
         rows_train=2_000, rows_val=400, rows_test=400,
         train_features=_make_features(100, 3),
         feature_names=["a", "b", "c"],
+        location_name="bonehill_rocks",
     )
     assert not result.passed
     assert not (new_dir / "training_summary.json").exists(), (
@@ -274,6 +279,7 @@ def test_build_check_and_save_singleton_overwrites_on_pass(tmp_path):
         rows_train=10_000, rows_val=2_000, rows_test=2_000,
         train_features=_make_features(100, 3),
         feature_names=["a", "b", "c"],
+        location_name="bonehill_rocks",
     )
     to_json(prev, summary_path)
 
@@ -284,6 +290,7 @@ def test_build_check_and_save_singleton_overwrites_on_pass(tmp_path):
         rows_train=10_500, rows_val=1_950, rows_test=2_050,
         train_features=_make_features(100, 3),
         feature_names=["a", "b", "c"],
+        location_name="bonehill_rocks",
     )
     assert result.passed
     saved = from_json(summary_path)
@@ -299,6 +306,7 @@ def test_build_check_and_save_singleton_does_not_overwrite_on_fail(tmp_path):
         rows_train=10_000, rows_val=2_000, rows_test=2_000,
         train_features=_make_features(100, 3),
         feature_names=["a", "b", "c"],
+        location_name="bonehill_rocks",
     )
     to_json(prev, summary_path)
 
@@ -309,6 +317,7 @@ def test_build_check_and_save_singleton_does_not_overwrite_on_fail(tmp_path):
         rows_train=2_000, rows_val=400, rows_test=400,
         train_features=_make_features(100, 3),
         feature_names=["a", "b", "c"],
+        location_name="bonehill_rocks",
     )
     assert not result.passed
     saved = from_json(summary_path)
@@ -326,6 +335,7 @@ def test_build_check_and_save_skips_when_features_empty(tmp_path):
         rows_train=0, rows_val=0, rows_test=0,
         train_features=np.zeros((0, 0)),
         feature_names=[],
+        location_name="bonehill_rocks",
     )
     assert result.passed
     assert "Empty train slice" in result.note
@@ -348,6 +358,7 @@ def test_try_load_previous_summary_versioned_filters_by_phase(tmp_path):
             rows_train=1000, rows_val=200, rows_test=200,
             train_features=_make_features(100, 3),
             feature_names=["a", "b", "c"],
+            location_name="bonehill_rocks",
         )
         to_json(s, d / "training_summary.json")
 
@@ -365,3 +376,21 @@ def test_try_load_previous_summary_versioned_returns_none_on_empty_dir(tmp_path)
 def test_try_load_previous_summary_singleton_returns_none_on_first_train(tmp_path):
     found = try_load_previous_summary_singleton(tmp_path / "training_summary.json")
     assert found is None
+
+
+# ----- LocationName required-at-load (Task #21) ------------------------
+
+
+def test_from_json_raises_when_location_name_missing(tmp_path):
+    # A summary on disk without LocationName is a corrupt/incomplete write
+    # (predates the 2026-05-12 backfill). Task #21 makes from_json refuse it
+    # loudly rather than warn-then-fallback. A blank LocationName is treated
+    # the same as an absent one.
+    path = tmp_path / "training_summary.json"
+    for payload in (
+        {"SchemaVersion": "1", "Composite": "precipitation_5a", "Phase": "5a"},
+        {"SchemaVersion": "1", "Composite": "precipitation_5a", "LocationName": "  "},
+    ):
+        path.write_text(json.dumps(payload))
+        with pytest.raises(ValueError, match="LocationName"):
+            from_json(path)
