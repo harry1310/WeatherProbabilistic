@@ -81,7 +81,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from src.data import LOCATION, WEATHERBLEND_DATA_ROOT  # noqa: E402
+from src.data import LOCATION, WEATHERBLEND_DATA_ROOT, stations_for_location  # noqa: E402
 
 # Location whose NWP fed the training data — pinned in metadata so the
 # .NET predict (PrecipPredictCommand) and python predict_4a both refuse
@@ -121,7 +121,9 @@ NDPOST = 1000
 SEED = 42
 PHASE = "4a"
 
-STATIONS = ["ea_bellever_dartmoor", "ea_bovey_tracey", "ea_dartmoor_nr_hexworthy"]
+# Station slugs for the active location — bonehill_rocks by default,
+# membury_devon when WB_LOCATION selects it (Phase B, commit 5).
+STATIONS = list(stations_for_location(ACTIVE_LOCATION))
 # All 5 leads (24/48/72/96/120). The original 9-cell research scope was
 # {24, 48, 72} only; we extend to 96/120 here because the per-cell
 # architecture should scale cleanly and the long-lead skill is what

@@ -82,6 +82,39 @@ STATIONS: tuple[tuple[str, str], ...] = (
     ("Bovey Tracey", "Bovey"),
 )
 
+# Per-location station slugs (the `station=` parquet-partition / manifest
+# form, ea_-prefixed). Phase 4a train + predict select their station set
+# by ACTIVE_LOCATION so a Membury retrain (WB_LOCATION=membury_devon)
+# trains the Membury gauges rather than Bonehill's. Derived from
+# WeatherBlend's config.yaml `locations[].rainfall.stations` (Phase B,
+# commit 5).
+STATIONS_BY_LOCATION: dict[str, tuple[str, ...]] = {
+    "bonehill_rocks": (
+        "ea_bellever_dartmoor",
+        "ea_bovey_tracey",
+        "ea_dartmoor_nr_hexworthy",
+    ),
+    "membury_devon": (
+        "ea_chards_snowdon_hill",
+        "ea_goren",
+        "ea_raymonds_hill",
+    ),
+}
+
+
+def stations_for_location(location: str) -> tuple[str, ...]:
+    """Station slugs trained for `location`. Raises KeyError on an unknown
+    location so a typo'd WB_LOCATION fails loudly rather than silently
+    training nothing."""
+    try:
+        return STATIONS_BY_LOCATION[location]
+    except KeyError:
+        raise KeyError(
+            f"No station list for location '{location}'. Known: "
+            f"{sorted(STATIONS_BY_LOCATION)}. Add it to STATIONS_BY_LOCATION "
+            "in src/data.py."
+        ) from None
+
 LEAD_HOURS = 24
 PHASE3_LEAD_HOURS: tuple[int, ...] = (24, 48, 72)
 # Phase 5a (lead-as-feature INLA) extends the lead horizon — `lead`

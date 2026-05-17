@@ -65,7 +65,12 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from src.data import LOCATION, WEATHERBLEND_DATA_ROOT, WET_THRESHOLD_MM  # noqa: E402
+from src.data import (  # noqa: E402
+    LOCATION,
+    WEATHERBLEND_DATA_ROOT,
+    WET_THRESHOLD_MM,
+    stations_for_location,
+)
 
 # Phase A multi-location safety (2026-05-12). Active NWP location for this
 # predict invocation. WB_LOCATION env var overrides the legacy default; we
@@ -82,7 +87,9 @@ ro.r(f'.libPaths(c("{_user_lib.replace(os.sep, "/")}", .libPaths()))')
 dbarts = importr("dbarts")
 
 PHASE = "4a"
-STATIONS = ["ea_bellever_dartmoor", "ea_bovey_tracey", "ea_dartmoor_nr_hexworthy"]
+# Station slugs for the active location — bonehill_rocks by default,
+# membury_devon when WB_LOCATION selects it (Phase B, commit 5).
+STATIONS = list(stations_for_location(ACTIVE_LOCATION))
 LEADS = [24, 48, 72, 96, 120]
 HORIZON_DAYS = 7
 
