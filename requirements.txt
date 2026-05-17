@@ -1,5 +1,10 @@
 pymc>=5.25
-arviz>=0.23
+# Cap <1.0: arviz 1.x rewrote InferenceData on top of xarray.DataTree and
+# dropped the classic InferenceData(posterior=...) constructor that
+# inla_partial_pooling.py uses — 1.1.0 drifted in and broke 5a's first CI
+# retrain (DataTree.__init__ got an unexpected keyword argument 'posterior').
+# 0.23.4 is the latest release with the classic API.
+arviz>=0.23,<1.0
 # arviz advertises netcdf4/h5netcdf as IO backends but doesn't hard-depend
 # on either; without one of them installed `az.from_netcdf` raises at runtime.
 # Pin h5netcdf (the Python wrapper) + h5py (the HDF5 bindings it relies on).
