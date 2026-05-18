@@ -85,6 +85,17 @@ jobs:
     # upload. Job-level timeout fires before GitHub's default 360 min
     # in case anything stalls.
     timeout-minutes: 180
+    strategy:
+      # One job per location. SERIAL (max-parallel: 1): each job pushes the
+      # shared precipitation MANIFEST.json, so a parallel job 2 would
+      # overwrite job 1's just-pushed manifest. Today 4a/5a are
+      # bonehill_rocks-only in phases.yaml, so the membury job resolves to
+      # no phases and is a fast no-op — but the matrix is here so adding
+      # membury to 4a's `locations:` later needs no workflow edit.
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        location: [bonehill_rocks, membury_devon]
     steps:
       - uses: actions/checkout@v4
 
@@ -183,34 +194,38 @@ jobs:
           cat ./config/phases.yaml
 
       - name: Decide which phases to run
-        # Source-of-truth resolution:
-        #   - "all" → all impl=python phases listed in phases.yaml.
-        #     Adding a new python phase to phases.yaml automatically
-        #     wires it into the Sunday default sweep WITHOUT editing this
-        #     file's "all" expansion (the historical "INPUT='4a,5a'"
-        #     bug-prone hardcoding).
-        #   - explicit comma-separated list → exact subset to run.
+        # phases.yaml (fetched from R2) is the single source of truth for
+        # which models run for which locations. Each impl=python phase
+        # carries an optional `locations:` filter (absent = every location);
+        # run_<id> is true only when the phase is requested AND this matrix
+        # location admits it.
         #
-        # Phase config can come from either trigger:
-        #   - workflow_dispatch: inputs.phases (default "all")
-        #   - repository_dispatch: client_payload.phases (default "all")
+        # 4a/5a are bonehill_rocks-only in phases.yaml today, so the
+        # membury matrix job resolves to no phases and skips every heavy
+        # step below — a fast no-op. Extend to Membury by adding it to the
+        # phase's `locations:` in phases.yaml, NOT by editing this workflow.
         #
         # NOTE: each phase still needs its own concrete "Train <id>" run
-        # block below — the YAML drives the "all" expansion and the
-        # validation set, but a new phase still needs the per-phase
-        # train invocation. Adding 5b: (1) edit phases.yaml in WB,
-        # (2) add a `run_5b` output emit + a `Train 5b` step here.
+        # block below. Adding 5b: (1) edit phases.yaml in WB, (2) add a
+        # run_5b case + a `Train 5b` step here.
         id: phases
         if: steps.gate.outputs.proceed == 'true'
         env:
           PHASES_DISPATCH: ${{ inputs.phases }}
           PHASES_PAYLOAD: ${{ github.event.client_payload.phases }}
+          MATRIX_LOCATION: ${{ matrix.location }}
         run: |
           # yq is pre-installed on ubuntu-latest (mikefarah/yq).
-          PYTHON_PHASES=$(yq -r '
-            [.targets | to_entries[].value.phases[] | select(.impl == "python") | .id] | join(",")
-          ' ./config/phases.yaml)
+          PHASES_YAML=./config/phases.yaml
+          # One "id|loc1,loc2" row per impl=python phase (empty = all locations).
+          mapfile -t PHASE_ROWS < <(yq -r '
+            .targets | to_entries[].value.phases[]
+            | select(.impl == "python")
+            | .id + "|" + ((.locations // []) | join(","))
+          ' "$PHASES_YAML")
+          PYTHON_PHASES=$(printf '%s\n' "${PHASE_ROWS[@]}" | cut -d'|' -f1 | paste -sd, -)
           echo "impl=python phases from phases.yaml: $PYTHON_PHASES"
+          echo "Matrix location: $MATRIX_LOCATION"
 
           if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
             INPUT="${PHASES_PAYLOAD:-all}"
@@ -218,16 +233,7 @@ jobs:
             INPUT="${PHASES_DISPATCH:-all}"
           fi
           if [ "$INPUT" = "all" ]; then INPUT="$PYTHON_PHASES"; fi
-          echo "Resolved phase list: $INPUT"
-
-          # Per-phase run flags. Each known python phase emits a flag here;
-          # unknown phases (in input but absent from phases.yaml) error
-          # out. Add a new flag here when wiring a new phase's run block.
-          run_4a=false; run_5a=false
-          case ",$INPUT," in *,4a,*) run_4a=true ;; esac
-          case ",$INPUT," in *,5a,*) run_5a=true ;; esac
-          echo "run_4a=$run_4a" >> "$GITHUB_OUTPUT"
-          echo "run_5a=$run_5a" >> "$GITHUB_OUTPUT"
+          echo "Requested phase list: $INPUT"
 
           # Validate input against phases.yaml — anything in INPUT that
           # isn't in PYTHON_PHASES is an unknown phase. Catches typos
@@ -245,9 +251,33 @@ jobs:
             fi
           done
 
+          # run_<id> = requested AND admitted by this matrix location.
+          run_4a=false; run_5a=false
+          for row in "${PHASE_ROWS[@]}"; do
+            id="${row%%|*}"
+            locs="${row#*|}"
+            requested=false
+            case ",$INPUT," in *",${id},"*) requested=true ;; esac
+            applies=false
+            if [ -z "$locs" ]; then
+              applies=true
+            else
+              case ",$locs," in *",${MATRIX_LOCATION},"*) applies=true ;; esac
+            fi
+            if [ "$requested" = "true" ] && [ "$applies" = "true" ]; then
+              case "$id" in
+                4a) run_4a=true ;;
+                5a) run_5a=true ;;
+                *) echo "::warning::phases.yaml impl=python phase '$id' has no Train step wired in retrain-python.yml — add run_${id} + a Train step." ;;
+              esac
+            fi
+          done
+          echo "run_4a=$run_4a" >> "$GITHUB_OUTPUT"
+          echo "run_5a=$run_5a" >> "$GITHUB_OUTPUT"
+          echo "Resolved: run_4a=$run_4a run_5a=$run_5a"
+
           if [ "$run_4a" = "false" ] && [ "$run_5a" = "false" ]; then
-            echo "::error::No phase run-blocks were enabled by input '$INPUT'. If you've added a new phase to phases.yaml, you also need to wire its run_<id>=true emit + Train step in retrain-python.yml."
-            exit 1
+            echo "::notice::No python phases run for location '$MATRIX_LOCATION' — this matrix job is a no-op (heavy install + train steps all skip)."
           fi
 
       - name: Decide spread-features flag
@@ -359,16 +389,17 @@ jobs:
           fi
 
       - name: Pull data trees from R2
-        # Both 4a and 5a need the forecast tree + EA truth. Pull once,
-        # let each phase consume what it needs.
-        if: steps.gate.outputs.proceed == 'true'
+        # Both 4a and 5a need the forecast tree + EA truth. Skipped on a
+        # no-op matrix location (no python phases resolved to run there).
+        if: steps.gate.outputs.proceed == 'true' && (steps.phases.outputs.run_4a == 'true' || steps.phases.outputs.run_5a == 'true')
         env:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          MATRIX_LOCATION: ${{ matrix.location }}
         run: |
-          mkdir -p ../WeatherBlend/data/forecasts/location=bonehill_rocks
+          mkdir -p "../WeatherBlend/data/forecasts/location=$MATRIX_LOCATION"
           for m in gfs_seamless ecmwf_ifs025 icon_seamless meteofrance_seamless gem_seamless ecmwf_aifs025_single jma_seamless; do
-            rclone copy "r2:${R2_BUCKET}/data/forecasts/location=bonehill_rocks/model=$m" \
-              "../WeatherBlend/data/forecasts/location=bonehill_rocks/model=$m" \
+            rclone copy "r2:${R2_BUCKET}/data/forecasts/location=$MATRIX_LOCATION/model=$m" \
+              "../WeatherBlend/data/forecasts/location=$MATRIX_LOCATION/model=$m" \
               --fast-list --transfers 16 --checkers 32
           done
           mkdir -p ../WeatherBlend/data/truth/rainfall
@@ -400,6 +431,8 @@ jobs:
         continue-on-error: true
         env:
           WEATHERBLEND_DATA_ROOT: ${{ github.workspace }}/../WeatherBlend/data
+          # train_4a.py reads WB_LOCATION (src/data.py ACTIVE_LOCATION).
+          WB_LOCATION: ${{ matrix.location }}
           R_HOME: /usr/lib/R
           R_LIBS_USER: /home/runner/R/x86_64-pc-linux-gnu-library/4.4
           RPY2_CFFI_MODE: ABI
@@ -448,6 +481,8 @@ jobs:
         continue-on-error: true
         env:
           WEATHERBLEND_DATA_ROOT: ${{ github.workspace }}/../WeatherBlend/data
+          # run_phase5_bayesian.py + extend_5a.py read WB_LOCATION.
+          WB_LOCATION: ${{ matrix.location }}
           R_LIBS_USER: /home/runner/R/x86_64-pc-linux-gnu-library/4.4
           # Run 25695815670 failed at INLA's `*** Fail to create directory`
           # under /tmp — / (~14 GB) is near-full after R + apt + fmesher
