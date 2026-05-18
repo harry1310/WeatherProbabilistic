@@ -1,5 +1,15 @@
 name: retrain-python
 
+env:
+  # rclone hang guard — every R2 transfer in this workflow inherits these.
+  # A failed/stalled transfer retries hard and a dead connection times out
+  # fast, instead of hanging silently to the job ceiling (a job timeout
+  # surfaces as a `cancelled` run, easy to miss).
+  RCLONE_TIMEOUT: 5m
+  RCLONE_CONTIMEOUT: 1m
+  RCLONE_LOW_LEVEL_RETRIES: "20"
+  RCLONE_RETRIES: "5"
+
 # Phase 2 of AUTO_RETRAIN_PLAN.md (slice 1) — manual-dispatch retrain
 # of WeatherProbabilistic Python phases (4a BART, 5a Bayesian logreg)
 # with per-phase configurability.

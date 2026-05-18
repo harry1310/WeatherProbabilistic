@@ -1,5 +1,15 @@
 name: predict-5a
 
+env:
+  # rclone hang guard — every R2 transfer in this workflow inherits these.
+  # A failed/stalled transfer retries hard and a dead connection times out
+  # fast, instead of hanging silently to the job ceiling (a job timeout
+  # surfaces as a `cancelled` run, easy to miss).
+  RCLONE_TIMEOUT: 5m
+  RCLONE_CONTIMEOUT: 1m
+  RCLONE_LOW_LEVEL_RETRIES: "20"
+  RCLONE_RETRIES: "5"
+
 # Phase 5a (Bayesian logistic regression) live predict.
 #
 # Reads the live forecast tree from R2 (written by WeatherBlend's collect.yml),
