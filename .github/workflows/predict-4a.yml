@@ -117,11 +117,24 @@ jobs:
               "../WeatherBlend/data/forecasts/location=bonehill_rocks/model=$m" \
               --fast-list --transfers 16 --checkers 32
           done
+          # Saved BART bundles: pull ONLY the newest *phase4a* version per
+          # station. predict reads just the latest, but 4a versions
+          # accumulate every retrain — globbing **/*phase4a*/** pulled the
+          # whole growing history (incl. orphans) every run, which is what
+          # eventually made this step slow enough to hit the job timeout.
+          # Station list + latest version both come from R2 — no hardcoded list.
           mkdir -p ../WeatherBlend/data/models/precipitation
-          rclone copy "r2:${R2_BUCKET}/data/models/precipitation" \
-            ../WeatherBlend/data/models/precipitation \
-            --include '**/*phase4a*/**' \
-            --fast-list --transfers 16 --checkers 32
+          for st in $(rclone lsf "r2:${R2_BUCKET}/data/models/precipitation/" --dirs-only); do
+            st="${st%/}"
+            latest=$(rclone lsf "r2:${R2_BUCKET}/data/models/precipitation/${st}/" --dirs-only \
+              | grep 'phase4a' | sort | tail -1)
+            latest="${latest%/}"
+            [ -z "$latest" ] && continue
+            echo "4a bundle for ${st}: ${latest}"
+            rclone copy "r2:${R2_BUCKET}/data/models/precipitation/${st}/${latest}" \
+              "../WeatherBlend/data/models/precipitation/${st}/${latest}" \
+              --fast-list --transfers 16 --checkers 32
+          done
 
       - name: Run Phase 4a state-load + predict
         # Per-cell BART: loads N states per station (one per lead),
