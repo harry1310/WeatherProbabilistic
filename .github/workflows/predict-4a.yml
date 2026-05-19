@@ -11,7 +11,8 @@ env:
   RCLONE_RETRIES: "5"
 
 # Phase 4a (dbarts BART) PREDICT — loads the saved state bundle minted
-# by train-4a.yml, applies it to fresh live forecast features, writes
+# by retrain-python.yml (phase 4a), applies it to fresh live forecast
+# features, writes
 # predictions parquet under the existing version. Runs 4× per day on the
 # Cloudflare 03/09/15/21 UTC tick (same tick as predict-5a, different
 # repo + R2 prefix so no contention).
@@ -19,8 +20,8 @@ env:
 # Pre-split this workflow ALSO trained on each daily run (~24 min wall).
 # Now training is its own workflow; the predict cycle just rehydrates
 # the saved state via warm-scaffold + setState (~30s wall) and predicts.
-# See train-4a.yml + scripts/predict_4a.py for the load mechanics, and
-# scripts/smoke_dbarts_roundtrip.py for the verified round-trip.
+# See scripts/train_4a.py + scripts/predict_4a.py for the load mechanics,
+# and scripts/smoke_dbarts_roundtrip.py for the verified round-trip.
 #
 # Failure path: WorkflowRun completed events with conclusion=failure
 # trigger the cross-repo /github-webhook handler in the Cloudflare
@@ -106,8 +107,8 @@ jobs:
         # Live forecast tree (RunTimeSource='reported') for prediction
         # features. NO truth pull — predict has no labels to join.
         # Saved bundles (state.rds + arrays.npz + preprocess.json + the
-        # two metadata json files) come from train-4a.yml; predict reads
-        # the latest *phase4a* version dir per station.
+        # two metadata json files) come from retrain-python.yml's 4a
+        # training; predict reads the latest *phase4a* version dir per station.
         env:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
@@ -164,7 +165,7 @@ jobs:
           python -u scripts/predict_4a.py $ARGS
 
       - name: Push Phase 4a predictions to R2
-        # Predictions only — bundle dirs are train-4a.yml's territory.
+        # Predictions only — bundle dirs are retrain-python.yml's (4a) territory.
         # Multiple predict cycles writing under the same model_version
         # but different date= partitions is the intended pattern; same-
         # day overwrites are idempotent.
