@@ -79,6 +79,7 @@ ACTIVE_LOCATION = os.environ.get("WB_LOCATION", LOCATION)
 
 from _shared import (  # noqa: E402
     MODELS_LEAN,
+    lead_day_bucket,
     resolve_station,
 )
 
@@ -140,11 +141,15 @@ def find_latest_bundle(models_root: Path, station_slug: str) -> Path:
 
 
 def build_live_features(station_friendly: str, anchor: datetime) -> pd.DataFrame:
-    """Live forecast features pooled across LEADS. Same DuckDB query as
-    predict_4a.build_pooled_live_features — identical underlying NWP +
-    derived features (precip stats, wind synoptic, hour/doy cyclical).
-    The `lead` column comes back attached; per-cell predict filters by
-    it lead-by-lead rather than passing lead as a model feature.
+    """Live forecast features for every hourly valid time in the horizon —
+    one row per ValidTimeUtc, the freshest run per (valid_time, model) with
+    the models averaged. Each row is then tagged with a day-bucketed trained
+    `lead` (24/48/72/96/120): bucket L covers the whole calendar day
+    anchor+L/24, mirroring WeatherBlend's
+    PrecipPredictCommand.BuildHourlyTargets. So 4a predicts hourly (24 valid
+    times per lead bucket, like 3a/3e) and the parquet's LeadHours column is
+    the bucket label — which is what the 4b join on (ValidTime, LeadHours)
+    expects. per-cell predict then filters by `lead` bucket-by-bucket.
     """
     fc_glob = str((WEATHERBLEND_DATA_ROOT / "forecasts" / "**" / "*.parquet")).replace("\\", "/")
     model_in = "(" + ",".join(f"'{full}'" for full, _ in MODELS_LEAN) + ")"
@@ -153,24 +158,25 @@ def build_live_features(station_friendly: str, anchor: datetime) -> pd.DataFrame
         for full, short in MODELS_LEAN
     )
     horizon_end = anchor + pd.Timedelta(days=HORIZON_DAYS)
-    leads_in = "(" + ",".join(str(L) for L in LEADS) + ")"
+    # No LeadHours filter — take the freshest run per (valid_time, model)
+    # across the whole horizon so every hourly valid time is covered. The
+    # trained lead bucket is derived per valid time below (lead_day_bucket).
     sql = f"""
     WITH latest AS (
-        SELECT ValidTimeUtc, Model, LeadHours, Precipitation,
+        SELECT ValidTimeUtc, Model, Precipitation,
                RelativeHumidity2m, Temperature2m, DewPoint2m,
                CloudCoverLow, CloudCoverMid, CloudCoverHigh,
                Cape, WindSpeed10m, WindDirection10m, SurfacePressure,
-               ROW_NUMBER() OVER (PARTITION BY ValidTimeUtc, Model, LeadHours
+               ROW_NUMBER() OVER (PARTITION BY ValidTimeUtc, Model
                                   ORDER BY RunTimeUtc DESC) AS rn
         FROM read_parquet('{fc_glob}', hive_partitioning = false, union_by_name = true)
         WHERE LocationName = '{ACTIVE_LOCATION}'
           AND RunTimeSource = 'reported'
-          AND LeadHours IN {leads_in}
           AND Model IN {model_in}
           AND ValidTimeUtc > timestamp '{anchor.isoformat()}'
           AND ValidTimeUtc <= timestamp '{horizon_end.isoformat()}'
     )
-    SELECT ValidTimeUtc, LeadHours,
+    SELECT ValidTimeUtc,
         {precip_pivot},
         AVG(RelativeHumidity2m)         AS rh_mean,
         AVG(Temperature2m - DewPoint2m) AS dew_depression_mean,
@@ -183,8 +189,8 @@ def build_live_features(station_friendly: str, anchor: datetime) -> pd.DataFrame
         AVG(COS(RADIANS(WindDirection10m))) AS wind_dir_cos_mean,
         AVG(SurfacePressure)                AS surface_pressure_mean
     FROM latest WHERE rn = 1
-    GROUP BY ValidTimeUtc, LeadHours
-    ORDER BY ValidTimeUtc, LeadHours
+    GROUP BY ValidTimeUtc
+    ORDER BY ValidTimeUtc
     """
     con = duckdb.connect(":memory:")
     df = con.execute(sql).fetch_df()
@@ -212,7 +218,16 @@ def build_live_features(station_friendly: str, anchor: datetime) -> pd.DataFrame
     df["doy_sin"]  = np.sin(doy_angle)
     df["doy_cos"]  = np.cos(doy_angle)
 
-    df = df.rename(columns={"LeadHours": "lead"})
+    # Day-bucketed hourly predict: tag each valid time with the trained-lead
+    # bucket (24/48/72/96/120) for the calendar day it lands on — bucket L
+    # spans the whole day anchor+L/24 (mirrors PrecipPredictCommand.
+    # BuildHourlyTargets). The per-cell predict loop scores each bucket with
+    # that lead's BART and writes the bucket as LeadHours, so the parquet
+    # matches 3a/3e: hourly valid times, bucket lead label.
+    df["lead"] = df["ValidTimeUtc"].apply(lambda v: lead_day_bucket(v, anchor))
+    # Drop valid times whose bucket has no trained BART — same-day rows
+    # (lead < 24) and anything past the longest trained lead.
+    df = df[df["lead"].isin(LEADS)].reset_index(drop=True)
     df["lead"] = df["lead"].astype(int)   # per-cell: integer lead matches dict keys
     return df
 

@@ -86,6 +86,22 @@ def resolve_station(station_input: str) -> tuple[str, str]:
     )
 
 
+def lead_day_bucket(valid_time, anchor) -> int:
+    """Trained-lead bucket (24 / 48 / 72 / 96 / 120 …) that ``valid_time``
+    falls into, for the day-bucketed hourly predict convention — bucket L
+    covers the whole calendar day ``anchor_date + L/24 days``. Mirrors
+    WeatherBlend's ``PrecipPredictCommand.BuildHourlyTargets``.
+
+    Returns ``days_after_anchor * 24``; the caller keeps only the buckets in
+    its trained ``LEADS`` set, so a same-day valid time resolves to 0 and a
+    far-horizon one past the longest trained lead is dropped. Accepts
+    anything ``pandas.Timestamp`` can parse for either argument.
+    """
+    v = pd.Timestamp(valid_time).normalize()
+    a = pd.Timestamp(anchor).normalize()
+    return (v - a).days * 24
+
+
 def build_features_via_duckdb(
     station_friendly: str,
     lead_hours: int,
