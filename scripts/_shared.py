@@ -31,6 +31,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.data import LOCATION, WEATHERBLEND_DATA_ROOT, WET_THRESHOLD_MM  # noqa: E402
+from src.weatherblend_config import STATION_NAME_BY_SLUG  # noqa: E402, F401
 
 # Mirrors PrecipFeatureBuilder.cs's lean spec — 7 NWPs, all optional, no required.
 # Order matters: matches `precip_<short>` column names in the C# pivot so any
@@ -59,17 +60,15 @@ assert len(FEATURE_NAMES) == 22
 
 OUTPUT_ROOT = ROOT / "reports" / "phase6_artefacts"
 
-# Slug ↔ friendly name. Friendly form is what's stored on the
-# parquet's StationName column (filter target for the truth join);
-# slug form is what model directories + predictions trees use
-# (lookup target for the 3a baseline metadata). Tracked here so
-# both halves of the bake-off see the same set of stations.
-STATION_NAME_BY_SLUG = {
-    "ea_bellever_dartmoor": "Bellever Dartmoor",
-    "ea_bovey_tracey": "Bovey Tracey",
-    "ea_dartmoor_nr_hexworthy": "Dartmoor nr Hexworthy",
-    "ea_princetown": "Princetown",
-}
+# STATION_NAME_BY_SLUG is now imported from src.weatherblend_config
+# (derived from WeatherBlend's config.yaml, the single source of truth
+# for station slug ↔ friendly name across both repos). Until 2026-05-20
+# this lived as a hand-curated dict here — Princetown was retired from
+# WeatherBlend's rainfall config 2026-05-04 but its row sat here until
+# the loader rewrite caught the drift, and the 3 Membury stations
+# added 2026-05-11 never landed here at all. The import above replaces
+# this block; the resolve_station helper below uses the imported dict
+# unchanged.
 
 
 def resolve_station(station_input: str) -> tuple[str, str]:

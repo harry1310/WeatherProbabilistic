@@ -94,6 +94,17 @@ jobs:
           acl = private
           EOF
 
+      - name: Fetch WeatherBlend config.yaml from R2
+        # src.weatherblend_config imports at module load time and reads
+        # this file to derive STATIONS_BY_LOCATION / STATION_NAME_BY_SLUG.
+        # WeatherBlend's previous-runs-refresh.yml publishes config.yaml
+        # to r2:${R2_BUCKET}/config/ on every tick.
+        env:
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          mkdir -p ./config
+          rclone copy "r2:${R2_BUCKET}/config/config.yaml" ./config/ --checkers 4
+
       - name: Pull live forecast tree from R2 (5 models the Bayesian needs)
         # Only the models the Bayesian posterior was trained on. Each
         # model's tree is ~30-50 MB at this scale; fetching all 5 is well

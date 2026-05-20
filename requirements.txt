@@ -38,6 +38,11 @@ fastprogress>=1.0
 # DuckDB powers the schema-tolerant parquet reader used by predict_4a /
 # predict_5a / the bake-off scripts (hive_partitioning + union_by_name).
 duckdb>=1.0
+# Required by src/weatherblend_config.py for parsing the cross-repo
+# config.yaml + phases.yaml fetched from R2 (the WeatherBlend bus).
+# Transitively installed by numpy/scipy historically; pinning explicitly
+# so a future dep prune doesn't silently break the config loader.
+pyyaml>=6.0
 # Bake-off-only deps (lightgbm, pymc-bart) live in requirements-bakeoff.txt
 # so production CI doesn't install them. predict_4a / predict_5a now import
 # their shared helpers from scripts/_shared.py rather than transitively

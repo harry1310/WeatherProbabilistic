@@ -86,20 +86,11 @@ STATIONS: tuple[tuple[str, str], ...] = (
 # form, ea_-prefixed). Phase 4a train + predict select their station set
 # by ACTIVE_LOCATION so a Membury retrain (WB_LOCATION=membury_devon)
 # trains the Membury gauges rather than Bonehill's. Derived from
-# WeatherBlend's config.yaml `locations[].rainfall.stations` (Phase B,
-# commit 5).
-STATIONS_BY_LOCATION: dict[str, tuple[str, ...]] = {
-    "bonehill_rocks": (
-        "ea_bellever_dartmoor",
-        "ea_bovey_tracey",
-        "ea_dartmoor_nr_hexworthy",
-    ),
-    "membury_devon": (
-        "ea_chards_snowdon_hill",
-        "ea_goren",
-        "ea_raymonds_hill",
-    ),
-}
+# WeatherBlend's config.yaml `locations[].rainfall.stations` —
+# previously hand-curated here, switched to the
+# src.weatherblend_config loader 2026-05-20 so adding a third location
+# is a single WB-config edit (no parallel WP edit required).
+from src.weatherblend_config import STATIONS_BY_LOCATION  # noqa: E402, F401
 
 
 def stations_for_location(location: str) -> tuple[str, ...]:

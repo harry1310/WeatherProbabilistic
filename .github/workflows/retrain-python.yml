@@ -189,19 +189,27 @@ jobs:
           acl = private
           EOF
 
-      - name: Fetch phases.yaml from R2
+      - name: Fetch phases.yaml + config.yaml from R2
         # WeatherBlend's previous-runs-refresh workflow pushes
-        # src/WeatherBlend/config/phases.yaml to r2:${R2_BUCKET}/config/
-        # on every refresh tick, so this is always recent. Cross-repo
-        # canonical config without checking out WeatherBlend.
+        # src/WeatherBlend/Config/phases.yaml + src/WeatherBlend/config.yaml
+        # to r2:${R2_BUCKET}/config/ on every refresh tick, so both are
+        # always recent. Cross-repo canonical config without checking
+        # out WeatherBlend. config.yaml feeds src.weatherblend_config
+        # (loaded at import time of src.data) so STATIONS_BY_LOCATION /
+        # STATION_NAME_BY_SLUG stay in sync with WB's location +
+        # rainfall.stations lists without a parallel WP edit.
         if: steps.gate.outputs.proceed == 'true'
         env:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
           mkdir -p ./config
           rclone copy "r2:${R2_BUCKET}/config/phases.yaml" ./config/ --checkers 4
+          rclone copy "r2:${R2_BUCKET}/config/config.yaml" ./config/ --checkers 4
           echo "----- phases.yaml -----"
           cat ./config/phases.yaml
+          echo "----- config.yaml (locations + station summary) -----"
+          # Just the location names + station counts — full file is verbose.
+          yq -r '.locations[] | "\(.name): \([.rainfall.stations[].name] | length) stations"' ./config/config.yaml
 
       - name: Decide which phases to run
         # phases.yaml (fetched from R2) is the single source of truth for

@@ -103,6 +103,19 @@ jobs:
           acl = private
           EOF
 
+      - name: Fetch WeatherBlend config.yaml from R2
+        # src.weatherblend_config imports at module load time and reads
+        # this file to derive STATIONS_BY_LOCATION / STATION_NAME_BY_SLUG.
+        # WeatherBlend's previous-runs-refresh.yml publishes config.yaml
+        # to r2:${R2_BUCKET}/config/ on every tick (same bus + cadence
+        # as phases.yaml). Loader falls back to a sibling checkout for
+        # local dev but in CI this fetch is required.
+        env:
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          mkdir -p ./config
+          rclone copy "r2:${R2_BUCKET}/config/config.yaml" ./config/ --checkers 4
+
       - name: Pull live forecast tree + saved BART bundles from R2
         # Live forecast tree (RunTimeSource='reported') for prediction
         # features. NO truth pull — predict has no labels to join.
