@@ -176,11 +176,35 @@ def to_json(summary: TrainingSummary, path: Path | str) -> None:
 
 def from_json(path: Path | str) -> TrainingSummary | None:
     """Load from disk; returns None if the file doesn't exist. Tolerates
-    extra fields (forwards-compat with future schema bumps)."""
+    extra fields (forwards-compat with future schema bumps).
+
+    Legacy handling (added 2026-05-25 after the 5a auto-retrain stalled
+    for 2 weeks on a pre-2026-05-12 summary written before LocationName
+    was required): if the file exists but its top-level dict is missing
+    the LocationName *key entirely*, treat as a pre-tightening write —
+    warn loudly and return None so the caller skips it as if absent.
+    First successful retrain after this overwrites with a current-schema
+    summary, restoring normal baseline-checking.
+
+    The strict ValueError in `_from_dict` still fires when LocationName
+    *is* present but blank/whitespace — that's a real corrupt write, not
+    a legacy file, and merits the loud failure the original tightening
+    intended.
+    """
+    import logging
     path = Path(path)
     if not path.exists():
         return None
     raw = json.loads(path.read_text())
+    if "LocationName" not in raw:
+        logging.warning(
+            "Ignoring legacy training_summary at %s — pre-2026-05-12 schema, "
+            "no 'LocationName' key. Treating as no-previous-baseline; the "
+            "next successful retrain writes a current-schema summary. Delete "
+            "this file from R2 at your leisure to silence the warning.",
+            path,
+        )
+        return None
     return _from_dict(raw)
 
 

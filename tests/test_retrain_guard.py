@@ -378,19 +378,48 @@ def test_try_load_previous_summary_singleton_returns_none_on_first_train(tmp_pat
     assert found is None
 
 
-# ----- LocationName required-at-load (Task #21) ------------------------
+# ----- LocationName required-at-load (Task #21, revised 2026-05-25) ----
+#
+# Original Task #21 made from_json refuse ANY summary without LocationName.
+# In practice this stalled the 5a auto-retrain for 2 weeks against a
+# pre-2026-05-12 R2 summary nobody had cleaned up. The 2026-05-25 revision
+# splits the two failure modes:
+#
+#   - "LocationName key absent" (legacy / pre-tightening write)
+#       → from_json warns and returns None — caller treats as no-baseline,
+#         first successful retrain overwrites the stale file with current
+#         schema. Loud warning so the operator knows to clean up R2.
+#
+#   - "LocationName key present but blank"
+#       → still raises ValueError — that's a real corrupt-write signal,
+#         not a legacy file, and merits the loud failure.
 
 
-def test_from_json_raises_when_location_name_missing(tmp_path):
-    # A summary on disk without LocationName is a corrupt/incomplete write
-    # (predates the 2026-05-12 backfill). Task #21 makes from_json refuse it
-    # loudly rather than warn-then-fallback. A blank LocationName is treated
-    # the same as an absent one.
+def test_from_json_returns_none_for_legacy_file_without_location_name(tmp_path, caplog):
+    # Pre-2026-05-12 schema: LocationName key missing entirely. Should warn
+    # and return None so the caller skips it as if absent. The first
+    # successful retrain overwrites with the current schema.
     path = tmp_path / "training_summary.json"
-    for payload in (
-        {"SchemaVersion": "1", "Composite": "precipitation_5a", "Phase": "5a"},
-        {"SchemaVersion": "1", "Composite": "precipitation_5a", "LocationName": "  "},
-    ):
-        path.write_text(json.dumps(payload))
-        with pytest.raises(ValueError, match="LocationName"):
-            from_json(path)
+    path.write_text(json.dumps({
+        "SchemaVersion": "1",
+        "Composite": "precipitation_5a",
+        "Phase": "5a",
+        "PerFeature": {},
+    }))
+    with caplog.at_level("WARNING"):
+        result = from_json(path)
+    assert result is None
+    assert any("legacy training_summary" in m for m in caplog.messages)
+
+
+def test_from_json_raises_when_location_name_blank(tmp_path):
+    # LocationName key present but whitespace-only is a real corrupt write,
+    # not a legacy file. Keep the loud failure the original Task #21 intent.
+    path = tmp_path / "training_summary.json"
+    path.write_text(json.dumps({
+        "SchemaVersion": "1",
+        "Composite": "precipitation_5a",
+        "LocationName": "  ",
+    }))
+    with pytest.raises(ValueError, match="LocationName"):
+        from_json(path)
