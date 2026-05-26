@@ -216,14 +216,24 @@ def train_one_station(station_friendly: str, station_slug: str) -> dict:
     syn_feats = ["wind_dir_sin_mean", "wind_dir_cos_mean", "surface_pressure_mean"]
     base_feats = list(FEATURE_NAMES) + syn_feats   # NOTE: no "lead" — per-cell
 
+    # Per-phase training-data cutoff (2026-05-26 — see src.phase_registry).
+    # 4a carries minValidTime: "2024-01-01" in phases.yaml; this lookup
+    # returns None for any phase without the field. Resolved once per
+    # train invocation; passed to every build_features_via_duckdb call.
+    from src.phase_registry import min_valid_time_for
+    min_valid_time = min_valid_time_for("precipitation", "4a")
+    if min_valid_time is not None:
+        print(f"  Phase 4a training-data cutoff: ValidTimeUtc >= {min_valid_time.date().isoformat()} "
+              f"(from phases.yaml)", flush=True)
+
     per_cell: dict[int, dict] = {}
     per_lead_stats: list[dict] = []
     pred_frames: list[pd.DataFrame] = []
 
     for lead in LEADS:
         print(f"\n  [{time.strftime('%H:%M:%S')}] lead {lead}h — building features", flush=True)
-        df = build_features_via_duckdb(station_friendly, lead)
-        df, syn_feats_added = add_synoptic_features(station_friendly, lead, df)
+        df = build_features_via_duckdb(station_friendly, lead, min_valid_time=min_valid_time)
+        df, syn_feats_added = add_synoptic_features(station_friendly, lead, df, min_valid_time=min_valid_time)
         feats = list(FEATURE_NAMES) + syn_feats_added
         cell = _prepare_cell(df, feats)
         print(f"    rows: train {len(cell['y_train']):,} · val {len(cell['val_df']):,} · "

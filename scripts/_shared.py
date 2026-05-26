@@ -114,6 +114,7 @@ def lead_day_bucket(valid_time, anchor) -> int:
 def build_features_via_duckdb(
     station_friendly: str,
     lead_hours: int,
+    min_valid_time=None,
 ) -> pd.DataFrame:
     """Mirror of WeatherBlend's PrecipFeatureBuilder.BuildForLead (C#) using
     DuckDB on the same parquet trees. Returns a DataFrame with the 22
@@ -124,6 +125,12 @@ def build_features_via_duckdb(
     names hardcoded for the lean 7-NWP set). Truth is the EA gauge with
     the strict 4-of-4 partial-hour rule the C# version uses (groups of
     15-min readings collapse to hourly only when all four are present).
+
+    ``min_valid_time`` (optional ``datetime``) is the training-data
+    cutoff (2026-05-26 — see ``src.phase_registry``). When set, both
+    SQL CTEs (hourly_truth + latest) clip on the same time boundary so
+    the inner-join post-clip cannot silently drop rows past the cutoff.
+    Default ``None`` = no cutoff (back-compat for the bake-off scripts).
     """
     fc_glob = str((WEATHERBLEND_DATA_ROOT / "forecasts" / "**" / "*.parquet")).replace("\\", "/")
     rn_glob = str((WEATHERBLEND_DATA_ROOT / "truth" / "rainfall" / "**" / "*.parquet")).replace("\\", "/")
@@ -136,6 +143,17 @@ def build_features_via_duckdb(
     precip_select = ", ".join(f"p.precip_{short}" for _, short in MODELS_LEAN)
     any_not_null = "(" + " OR ".join(f"p.precip_{short} IS NOT NULL" for _, short in MODELS_LEAN) + ")"
 
+    # Optional minValidTime cutoff. ISO format keeps the DuckDB literal
+    # unambiguous regardless of locale; applied to BOTH CTEs (truth +
+    # forecasts) so the join doesn't silently drop one side's rows.
+    if min_valid_time is not None:
+        ts = min_valid_time.strftime("%Y-%m-%d %H:%M:%S")
+        observed_filter = f"      AND ObservedTimeUtc >= TIMESTAMP '{ts}'\n"
+        valid_filter    = f"      AND ValidTimeUtc >= TIMESTAMP '{ts}'\n"
+    else:
+        observed_filter = ""
+        valid_filter = ""
+
     sql = f"""
     WITH hourly_truth AS (
         SELECT
@@ -145,7 +163,7 @@ def build_features_via_duckdb(
         WHERE LocationName = '{ACTIVE_LOCATION}'
           AND StationName  = '{station_friendly}'
           AND Value15MinMm IS NOT NULL
-        GROUP BY 1
+{observed_filter}        GROUP BY 1
         HAVING COUNT(*) = 4
     ),
     latest AS (
@@ -164,7 +182,7 @@ def build_features_via_duckdb(
           AND RunTimeSource = 'offset_day'
           AND LeadHours = {lead_hours}
           AND Model IN {model_in_clause}
-    ),
+{valid_filter}    ),
     pivoted AS (
         SELECT
             ValidTimeUtc,
@@ -242,13 +260,22 @@ def time_split(df: pd.DataFrame, train_frac: float = 0.70, val_frac: float = 0.1
 
 
 def add_synoptic_features(station_friendly: str, lead_hours: int,
-                          df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+                          df: pd.DataFrame,
+                          min_valid_time=None) -> tuple[pd.DataFrame, list[str]]:
     """Pull NWP-mean wind direction (encoded as sin/cos unit vector to avoid
     the 0°/360° circular-mean discontinuity) and NWP-mean surface pressure
     via DuckDB, then merge onto df by ValidTimeUtc.
+
+    ``min_valid_time`` mirrors ``build_features_via_duckdb`` — clipped at
+    the same boundary so the synoptic SQL doesn't pull rows that the
+    later merge would discard anyway. Default ``None`` = no cutoff.
     """
     fc_glob = str((WEATHERBLEND_DATA_ROOT / "forecasts" / "**" / "*.parquet")).replace("\\", "/")
     model_in_clause = "(" + ",".join(f"'{full}'" for full, _ in MODELS_LEAN) + ")"
+    valid_filter = (
+        f"          AND ValidTimeUtc >= TIMESTAMP '{min_valid_time.strftime('%Y-%m-%d %H:%M:%S')}'\n"
+        if min_valid_time is not None else ""
+    )
     sql = f"""
     WITH latest AS (
         SELECT
@@ -263,7 +290,7 @@ def add_synoptic_features(station_friendly: str, lead_hours: int,
           AND RunTimeSource = 'offset_day'
           AND LeadHours = {lead_hours}
           AND Model IN {model_in_clause}
-    )
+{valid_filter}    )
     SELECT
         ValidTimeUtc,
         AVG(SIN(RADIANS(WindDirection10m))) AS wind_dir_sin_mean,

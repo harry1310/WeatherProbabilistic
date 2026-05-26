@@ -264,11 +264,19 @@ def main() -> None:
 
     print(f"[{time.strftime('%H:%M:%S')}] Loading Phase 3 dataset "
           f"(5-model, lead-as-feature, full-21feat for INLA backend)")
+    # Per-phase training-data cutoff (2026-05-26 — see src.phase_registry).
+    from src.phase_registry import min_valid_time_for
+    min_valid_time = min_valid_time_for("precipitation", "5a")
+    if min_valid_time is not None:
+        print(f"  Phase 5a training-data cutoff: ValidTimeUtc >= "
+              f"{min_valid_time.date().isoformat()} (from phases.yaml)")
+
     ds = prepare_phase3_dataset(
         models=MODELS_NO_UKMO, lead_as_feature=True,
         leads=PHASE5A_LEAD_HOURS,
         feature_set="full",
         verbose=False,
+        min_valid_time=min_valid_time,
     )
     print(f"  test rows: {len(ds.X_test):,}  features: {len(ds.feature_names)}")
 

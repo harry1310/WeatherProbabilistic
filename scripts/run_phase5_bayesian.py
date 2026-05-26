@@ -124,11 +124,23 @@ def main() -> None:
     # is retained as a no-op since spread features are part of the
     # full feature_set='full' bundle now (was 8/10-feat toggle on
     # the minimal feature set).
+    # Per-phase training-data cutoff (2026-05-26 — see src.phase_registry).
+    # 5a carries minValidTime: "2024-01-01" in phases.yaml because pre-2024
+    # NWP rows from non-JMA models are NULL-padded. Looked up via the same
+    # registry the WB-side phases use; returns None for phases without a
+    # cutoff (back-compat for any future caller).
+    from src.phase_registry import min_valid_time_for
+    min_valid_time = min_valid_time_for("precipitation", "5a")
+    if min_valid_time is not None:
+        print(f"  Phase 5a training-data cutoff: ValidTimeUtc >= "
+              f"{min_valid_time.date().isoformat()} (from phases.yaml)")
+
     ds = prepare_phase3_dataset(
         models=MODELS_NO_UKMO, lead_as_feature=True,
         leads=PHASE5A_LEAD_HOURS,
         feature_set="full",
         verbose=False,
+        min_valid_time=min_valid_time,
     )
     print(f"  train rows: {len(ds.X_train):,}  test rows: {len(ds.X_test):,}")
     print(f"  features ({len(ds.feature_names)}): {ds.feature_names}")

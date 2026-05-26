@@ -630,6 +630,7 @@ def prepare_phase3_dataset(
     lead_as_feature: bool = False,
     add_spread_features: bool = False,
     feature_set: str = "minimal",
+    min_valid_time=None,
 ) -> Phase3Dataset:
     """Three-station × multi-lead loader for Phase 3.
 
@@ -671,6 +672,18 @@ def prepare_phase3_dataset(
             leads, verbose=verbose, models=models)
     else:
         raise ValueError(f"feature_set must be 'minimal' or 'full', got {feature_set!r}")
+
+    # Optional training-data cutoff (2026-05-26 — see src.phase_registry).
+    # Clip the forecasts DataFrame BEFORE the truth merge + scaler fit so
+    # the cutoff propagates to every downstream consumer (train/val/test
+    # slicing, StandardScaler fit, posterior fit). 5a's run_phase5_bayesian
+    # passes precipitation/5a's minValidTime here; bake-off scripts that
+    # want full history pass None.
+    if min_valid_time is not None:
+        before = len(forecasts)
+        forecasts = forecasts[forecasts["ValidTimeUtc"] >= pd.Timestamp(min_valid_time)].reset_index(drop=True)
+        if verbose:
+            print(f"  minValidTime cutoff {min_valid_time}: {before:,} -> {len(forecasts):,} forecast rows")
 
     # Optional spread features mirroring 3a/4a's non-linear inputs:
     # precip_max captures "at least one NWP says wet", precip_agreement_wet_01
