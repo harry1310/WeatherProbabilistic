@@ -270,7 +270,7 @@ jobs:
           done
 
           # run_<id> = requested AND admitted by this matrix location.
-          run_4a=false; run_5a=false
+          run_4a=false; run_5a=false; run_3f=false
           for row in "${PHASE_ROWS[@]}"; do
             id="${row%%|*}"
             locs="${row#*|}"
@@ -286,15 +286,17 @@ jobs:
               case "$id" in
                 4a) run_4a=true ;;
                 5a) run_5a=true ;;
+                3f) run_3f=true ;;
                 *) echo "::warning::phases.yaml impl=python phase '$id' has no Train step wired in retrain-python.yml — add run_${id} + a Train step." ;;
               esac
             fi
           done
           echo "run_4a=$run_4a" >> "$GITHUB_OUTPUT"
           echo "run_5a=$run_5a" >> "$GITHUB_OUTPUT"
-          echo "Resolved: run_4a=$run_4a run_5a=$run_5a"
+          echo "run_3f=$run_3f" >> "$GITHUB_OUTPUT"
+          echo "Resolved: run_4a=$run_4a run_5a=$run_5a run_3f=$run_3f"
 
-          if [ "$run_4a" = "false" ] && [ "$run_5a" = "false" ]; then
+          if [ "$run_4a" = "false" ] && [ "$run_5a" = "false" ] && [ "$run_3f" = "false" ]; then
             echo "::notice::No python phases run for location '$MATRIX_LOCATION' — this matrix job is a no-op (heavy install + train steps all skip)."
           fi
 
@@ -407,9 +409,9 @@ jobs:
           fi
 
       - name: Pull data trees from R2
-        # Both 4a and 5a need the forecast tree + EA truth. Skipped on a
+        # 4a, 5a, 3f all need the forecast tree + EA truth. Skipped on a
         # no-op matrix location (no python phases resolved to run there).
-        if: steps.gate.outputs.proceed == 'true' && (steps.phases.outputs.run_4a == 'true' || steps.phases.outputs.run_5a == 'true')
+        if: steps.gate.outputs.proceed == 'true' && (steps.phases.outputs.run_4a == 'true' || steps.phases.outputs.run_5a == 'true' || steps.phases.outputs.run_3f == 'true')
         env:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
           MATRIX_LOCATION: ${{ matrix.location }}
@@ -424,16 +426,28 @@ jobs:
           rclone copy "r2:${R2_BUCKET}/data/truth/rainfall" \
             ../WeatherBlend/data/truth/rainfall \
             --fast-list --transfers 16 --checkers 32
-          # Pull MANIFEST.json so train_4a + extend_5a can promote the
-          # new versions into the EXISTING Active list rather than
-          # starting from a blank manifest. Without this, the promote
+          # Pull precipitation MANIFEST.json so train_4a + extend_5a can
+          # promote the new versions into the EXISTING Active list rather
+          # than starting from a blank manifest. Without this, the promote
           # helper would mint a fresh manifest with only the freshly
           # trained version's station entries — clobbering the .NET
           # phases' Bonehill entries on the next push. Critical.
+          # train_3f also reads this manifest to resolve the bound 3a
+          # champion version it stamps into its own bundle metadata.
           mkdir -p ../WeatherBlend/data/models/precipitation
           rclone copyto "r2:${R2_BUCKET}/data/models/precipitation/MANIFEST.json" \
             ../WeatherBlend/data/models/precipitation/MANIFEST.json \
-            --s3-no-check-bucket || echo "::warning::No MANIFEST.json on R2 yet — promote will create one."
+            --s3-no-check-bucket || echo "::warning::No precipitation MANIFEST.json on R2 yet — train_3f will warn + stamp empty precip_3a_version."
+          # Pull the rainfall_amount manifest too (for the 3f promote step).
+          # Same idempotency reason as above — promote merges into existing
+          # entries rather than starting blank. First run on a fresh tree
+          # the manifest may not exist yet; promote will create it.
+          if [ "${{ steps.phases.outputs.run_3f }}" = "true" ]; then
+            mkdir -p ../WeatherBlend/data/models/rainfall_amount
+            rclone copyto "r2:${R2_BUCKET}/data/models/rainfall_amount/MANIFEST.json" \
+              ../WeatherBlend/data/models/rainfall_amount/MANIFEST.json \
+              --s3-no-check-bucket || echo "::notice::No rainfall_amount MANIFEST.json on R2 yet — train_3f will create one."
+          fi
 
       - name: Train 4a (BART, per-cell)
         # 3 stations × 5 leads = 15 BART fits per run, ~5-8 min each
@@ -538,6 +552,27 @@ jobs:
           fi
           python -u scripts/extend_5a.py $EXTEND_ARGS
 
+      - name: Train 3f (NGBoost-LogNormal, per-cell)
+        # 3 Membury stations × 5 leads = 15 NGBoost fits per run. Per-cell
+        # wall is ~30-60s for the 500-tree default + early stopping;
+        # total ~10-15 min for the full sweep. Membury-only — phases.yaml's
+        # locations: ["membury_devon"] filter on the rainfall_amount/3f
+        # entry means the Bonehill matrix job resolves run_3f=false and
+        # this step skips entirely for that job.
+        id: train_3f
+        if: steps.gate.outputs.proceed == 'true' && steps.phases.outputs.run_3f == 'true'
+        # continue-on-error so a 3f failure doesn't strand a successful
+        # 4a/5a push (or vice versa). Aggregator re-fails the job.
+        continue-on-error: true
+        env:
+          WEATHERBLEND_DATA_ROOT: ${{ github.workspace }}/../WeatherBlend/data
+          WB_LOCATION: ${{ matrix.location }}
+        run: |
+          ANCHOR="${{ inputs.anchor }}"
+          ARGS=""
+          if [ -n "$ANCHOR" ]; then ARGS="--anchor $ANCHOR"; fi
+          python -u scripts/train_3f.py $ARGS
+
       # ----- R2 auto-push (2026-05-10) ----------------------------------
       # Slice 1's "upload as workflow artifact only" was always meant to
       # be temporary; user authorised auto-push for both phases after
@@ -592,16 +627,35 @@ jobs:
             --fast-list --transfers 16 --checkers 32 --s3-no-check-bucket \
             --include "**/*phase5a*/**"
 
+      - name: Push 3f bundles to R2
+        # train_3f.py writes per-(station, lead) NGBoost pickles +
+        # preprocess + metadata under
+        # ../WeatherBlend/data/models/rainfall_amount/{station}/v..._phase3f/.
+        # rainfall_amount is its own target tree (separate from
+        # precipitation/), so the push targets r2:.../rainfall_amount.
+        # First run on a fresh tree the R2 prefix doesn't exist yet —
+        # --s3-no-check-bucket flag suppresses the CreateBucket probe
+        # that the rclone IAM token can't satisfy (same pattern as
+        # other first-push steps in the codebase).
+        if: steps.phases.outputs.run_3f == 'true' && steps.train_3f.outcome == 'success'
+        env:
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          rclone copy ../WeatherBlend/data/models/rainfall_amount \
+            "r2:${R2_BUCKET}/data/models/rainfall_amount" \
+            --fast-list --transfers 16 --checkers 32 --s3-no-check-bucket \
+            --include "**/*phase3f*/**"
+
       - name: Push MANIFEST.json to R2
-        # train_4a.py + extend_5a.py promote the freshly-trained version
-        # into the local MANIFEST.json's Active list (added 2026-05-12 —
-        # see manifest_promote.py module docstring for why; root-cause was
-        # "no 4a on site since midday May 10" symptom). The 4a + 5a
+        # train_4a.py + extend_5a.py + train_3f.py all promote the freshly-
+        # trained version into the local MANIFEST.json's Active list (added
+        # 2026-05-12 — see manifest_promote.py module docstring for why;
+        # root-cause was "no 4a on site since midday May 10" symptom). The
         # bundle-push steps above use --include filters scoped to phase
-        # subtrees, so MANIFEST.json (at the precipitation root) wouldn't
-        # be picked up by either. This step does the explicit manifest
-        # push. No --include because we want exactly this one file.
-        if: (steps.phases.outputs.run_4a == 'true' && steps.train_4a.outcome == 'success') || (steps.phases.outputs.run_5a == 'true' && steps.train_5a.outcome == 'success')
+        # subtrees, so MANIFEST.json (at each target's root) wouldn't be
+        # picked up by either. This step does the explicit manifest push
+        # for each target tree any phase promoted into.
+        if: (steps.phases.outputs.run_4a == 'true' && steps.train_4a.outcome == 'success') || (steps.phases.outputs.run_5a == 'true' && steps.train_5a.outcome == 'success') || (steps.phases.outputs.run_3f == 'true' && steps.train_3f.outcome == 'success')
         env:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
@@ -609,9 +663,15 @@ jobs:
             rclone copyto ../WeatherBlend/data/models/precipitation/MANIFEST.json \
               "r2:${R2_BUCKET}/data/models/precipitation/MANIFEST.json" \
               --s3-no-check-bucket
-            echo "Pushed MANIFEST.json to R2."
+            echo "Pushed precipitation/MANIFEST.json to R2."
           else
-            echo "::warning::MANIFEST.json not found locally — train must have failed before promote step ran."
+            echo "::warning::precipitation/MANIFEST.json not found locally."
+          fi
+          if [ -f ../WeatherBlend/data/models/rainfall_amount/MANIFEST.json ]; then
+            rclone copyto ../WeatherBlend/data/models/rainfall_amount/MANIFEST.json \
+              "r2:${R2_BUCKET}/data/models/rainfall_amount/MANIFEST.json" \
+              --s3-no-check-bucket
+            echo "Pushed rainfall_amount/MANIFEST.json to R2."
           fi
 
       - name: Aggregate retrain results
@@ -624,6 +684,7 @@ jobs:
           failed=()
           if [ "${{ steps.train_4a.outcome }}" = "failure" ]; then failed+=("4a"); fi
           if [ "${{ steps.train_5a.outcome }}" = "failure" ]; then failed+=("5a"); fi
+          if [ "${{ steps.train_3f.outcome }}" = "failure" ]; then failed+=("3f"); fi
           if [ ${#failed[@]} -gt 0 ]; then
             echo "::error::Retrain failed for phase(s): ${failed[*]}. Passing phases were still pushed to R2 — inspect each failed phase's log above."
             exit 1
