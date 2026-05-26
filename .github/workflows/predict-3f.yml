@@ -1,0 +1,208 @@
+name: predict-3f
+
+env:
+  RCLONE_TIMEOUT: 5m
+  RCLONE_CONTIMEOUT: 1m
+  RCLONE_LOW_LEVEL_RETRIES: "20"
+  RCLONE_RETRIES: "5"
+
+# Phase 3f (NGBoost-LogNormal) PREDICT — Membury rainfall_amount.
+#
+# Sandwiches between WeatherBlend's predict.yml (writes 3a's hourly
+# π parquets) and render-site.yml (renders the rainfall_amount card).
+# The Cloudflare scheduler-worker chain is:
+#
+#   s3-collect → predict (WB)  → predict-3f (here) → render-site (WB)
+#                ^ Hop D ^      ^ Hop F.1 (new)   ^ Hop F (re-gated)
+#
+# predict_3f.py reads:
+#   - data/forecasts/location=membury_devon (for the 15-feature live vector)
+#   - data/models/rainfall_amount/{station}/{v_phase3f}/ (NGBoost pickles + preprocess + metadata)
+#   - data/predictions/precipitation/{station}/model_version={precip_3a_version}/
+#       date={anchor}/predictions.parquet (the bound 3a champion's π)
+#
+# and writes:
+#   - data/predictions/rainfall_amount/{station}/model_version={v_phase3f}/
+#       date={anchor}/predictions.parquet (one row per ValidTime × Lead,
+#       mixed-distribution: μ_log, σ_log, π, quantiles, exceedance probs)
+#
+# Failure path: the same /github-webhook handler in the Cloudflare
+# scheduler-worker that watches predict-4a / predict-5a opens a
+# `[ci-fail] predict-3f` issue under the `ci-failure` label on
+# any failed run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      anchor:
+        description: "Anchor date YYYY-MM-DD (UTC). Empty = today."
+        required: false
+        type: string
+      stations:
+        description: "Comma-separated station slugs (default: all 3 Membury active)."
+        required: false
+        type: string
+
+concurrency:
+  # 3f writes to a distinct R2 prefix (rainfall_amount/) from 4a/5a
+  # (precipitation/), so the per-repo lock is just to keep two close-
+  # together cycles from racing each other on R2 reads.
+  group: weatherprobabilistic-3f
+  cancel-in-progress: false
+
+jobs:
+  predict-3f:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python deps
+        # ngboost==0.5.10 is in requirements.txt with a strict pin —
+        # distributional pickles are brittle across minors, same lesson
+        # as the dbarts tree-serialisation gotcha. No rpy2/R needed: 3f
+        # is pure Python end-to-end.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install rclone
+        run: |
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+          rclone version
+
+      - name: Configure rclone for R2
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+        run: |
+          mkdir -p ~/.config/rclone
+          cat > ~/.config/rclone/rclone.conf <<EOF
+          [r2]
+          type = s3
+          provider = Cloudflare
+          access_key_id = ${R2_ACCESS_KEY_ID}
+          secret_access_key = ${R2_SECRET_ACCESS_KEY}
+          endpoint = ${R2_ENDPOINT}
+          acl = private
+          EOF
+
+      - name: Fetch WeatherBlend config.yaml from R2
+        # Same R2 bus pattern as predict-4a / predict-5a — src.weatherblend_config
+        # reads this at import time to derive STATIONS_BY_LOCATION.
+        env:
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          mkdir -p ./config
+          rclone copy "r2:${R2_BUCKET}/config/config.yaml" ./config/ --checkers 4
+
+      - name: Pull live forecast tree + 3f bundles + bound 3a predictions
+        # Three R2 pulls:
+        #   1. Membury forecast tree — feeds the 15-feature live vector
+        #      (predict_3f.build_live_features).
+        #   2. Latest *_phase3f bundle per Membury station — the NGBoost
+        #      pickles + preprocess + metadata. predict_3f.find_latest_bundle
+        #      filters to the newest with the per-lead pickle layout.
+        #   3. Latest *non-phase-suffixed (= 3a champion) predictions
+        #      parquet per Membury station for today's anchor — supplies
+        #      π. predict_3f reads the exact bound version stamped in
+        #      the 3f bundle's training_metadata.precip_3a_version.
+        #
+        # No truth pull — predict has no labels to join.
+        env:
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          mkdir -p ../WeatherBlend/data/forecasts/location=membury_devon
+          for m in gfs_seamless ecmwf_ifs025 icon_seamless meteofrance_seamless gem_seamless ecmwf_aifs025_single jma_seamless; do
+            rclone copy "r2:${R2_BUCKET}/data/forecasts/location=membury_devon/model=$m" \
+              "../WeatherBlend/data/forecasts/location=membury_devon/model=$m" \
+              --fast-list --transfers 16 --checkers 32
+          done
+
+          # Latest *_phase3f bundle per Membury station. Station list
+          # comes from R2 — no hardcoded names. The latest selector
+          # mirrors predict-4a's: lexicographic max of phase3f-tagged
+          # version dirs.
+          mkdir -p ../WeatherBlend/data/models/rainfall_amount
+          for st in $(rclone lsf "r2:${R2_BUCKET}/data/models/rainfall_amount/" --dirs-only 2>/dev/null); do
+            st="${st%/}"
+            latest=$(rclone lsf "r2:${R2_BUCKET}/data/models/rainfall_amount/${st}/" --dirs-only 2>/dev/null \
+              | grep 'phase3f' | sort | tail -1)
+            latest="${latest%/}"
+            [ -z "$latest" ] && continue
+            echo "3f bundle for ${st}: ${latest}"
+            rclone copy "r2:${R2_BUCKET}/data/models/rainfall_amount/${st}/${latest}" \
+              "../WeatherBlend/data/models/rainfall_amount/${st}/${latest}" \
+              --fast-list --transfers 16 --checkers 32
+          done
+
+          # Bound 3a predictions for today's anchor. predict_3f resolves
+          # precip_3a_version from each bundle's training_metadata, so
+          # the pull here is broad — every 3a (= unsuffixed) version
+          # dir's today partition for each Membury station. Smallest
+          # cheap pull that always contains the version we want;
+          # predict_3f errors loudly if its stamped version is missing.
+          ANCHOR_TODAY=$(date -u +%Y-%m-%d)
+          mkdir -p ../WeatherBlend/data/predictions/precipitation
+          for st in $(rclone lsf "r2:${R2_BUCKET}/data/models/rainfall_amount/" --dirs-only 2>/dev/null); do
+            st="${st%/}"
+            for v in $(rclone lsf "r2:${R2_BUCKET}/data/predictions/precipitation/${st}/" --dirs-only 2>/dev/null \
+                       | grep -v 'phase' | sort | tail -3); do
+              v="${v%/}"
+              src="r2:${R2_BUCKET}/data/predictions/precipitation/${st}/${v}/date=${ANCHOR_TODAY}"
+              dest="../WeatherBlend/data/predictions/precipitation/${st}/${v}/date=${ANCHOR_TODAY}"
+              if rclone lsf "${src}/" 2>/dev/null | grep -q predictions.parquet; then
+                rclone copy "${src}" "${dest}" --checkers 4
+                echo "3a π for ${st}: ${v}/date=${ANCHOR_TODAY}"
+              fi
+            done
+          done
+
+      - name: Run Phase 3f predict
+        # 3 Membury stations × 5 leads = up to 15 cells to score.
+        # NGBoost predict is cheap (~1-2s per cell), total ~30s wall.
+        # continue-on-error: between code deploy and the first 3f
+        # bundle landing on R2, find_latest_bundle warns + skips per
+        # station — let the workflow exit cleanly.
+        continue-on-error: true
+        env:
+          WEATHERBLEND_DATA_ROOT: ${{ github.workspace }}/../WeatherBlend/data
+          WB_LOCATION: membury_devon
+        run: |
+          ANCHOR="${{ github.event.inputs.anchor }}"
+          STATIONS="${{ github.event.inputs.stations }}"
+          ARGS=""
+          if [ -n "$ANCHOR" ]; then ARGS="$ARGS --anchor $ANCHOR"; fi
+          if [ -n "$STATIONS" ]; then
+            STATIONS_LIST=$(echo "$STATIONS" | tr ',' ' ')
+            ARGS="$ARGS --stations $STATIONS_LIST"
+          fi
+          python -u scripts/predict_3f.py $ARGS
+
+      - name: Push Phase 3f predictions to R2
+        # rainfall_amount is its own target tree on R2 — first push to
+        # a fresh prefix needs --s3-no-check-bucket (same IAM-token
+        # gotcha as the other first-push steps in this repo).
+        env:
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          rclone copy ../WeatherBlend/data/predictions/rainfall_amount \
+            "r2:${R2_BUCKET}/data/predictions/rainfall_amount" \
+            --include '**/model_version=*phase3f*/**' \
+            --fast-list --transfers 16 --checkers 32 --progress --s3-no-check-bucket
+
+      - name: Upload logs as artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: predict-3f-${{ github.run_id }}
+          path: |
+            *.log
+            reports/
+          retention-days: 7
+          if-no-files-found: ignore
