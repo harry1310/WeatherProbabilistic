@@ -212,7 +212,17 @@ def load_bound_3a_pi(
     """Read TODAY's 3a champion predictions parquet for this station
     and return (ValidTimeUtc, LeadHours, ProbWet) — the π values we
     mix into the 3f predictive distribution. Raises if the parquet
-    is missing; predict_3f without a stage-1 source is meaningless."""
+    is missing; predict_3f without a stage-1 source is meaningless.
+
+    DEDUPES on (ValidTimeUtc, LeadHours) keeping the freshest
+    PredictionMadeAtUtc — today's 3a parquet typically holds 4-5
+    intra-day cycles (predict.yml fires every 6h) and an un-deduped
+    merge against df_live (24 rows per lead) would broadcast to
+    (24 * cycles) rows per lead, blowing up downstream numpy ops
+    with a (120,) vs (24,) shape mismatch (regression 2026-05-26).
+    Same ROW_NUMBER pattern Phase4bPredictCommand.cs uses on its
+    3o parquet read.
+    """
     date_str = anchor.date().isoformat()
     parquet = (
         predictions_root
@@ -230,10 +240,18 @@ def load_bound_3a_pi(
             f"({precip_3a_version}) is stale vs the on-disk 3a tree."
         )
     con = duckdb.connect(":memory:")
-    df = con.execute(
-        f"SELECT ValidTimeUtc, LeadHours, ProbWet "
-        f"FROM read_parquet('{parquet.as_posix()}')"
-    ).fetch_df()
+    df = con.execute(f"""
+        WITH ranked AS (
+          SELECT ValidTimeUtc, LeadHours, ProbWet, PredictionMadeAtUtc,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY ValidTimeUtc, LeadHours
+                   ORDER BY PredictionMadeAtUtc DESC
+                 ) AS rn
+          FROM read_parquet('{parquet.as_posix()}')
+        )
+        SELECT ValidTimeUtc, LeadHours, ProbWet
+        FROM ranked WHERE rn = 1
+    """).fetch_df()
     con.close()
     df["LeadHours"] = df["LeadHours"].astype(int)
     return df
@@ -417,6 +435,17 @@ def predict_one_station(
         # df_lead's lead is the day-bucketed integer matching 3a's writer.
         df_lead_join = df_lead[["ValidTimeUtc", "lead"]].rename(columns={"lead": "LeadHours"})
         df_lead_join = df_lead_join.merge(df_3a, on=["ValidTimeUtc", "LeadHours"], how="left")
+        # Belt-and-braces defence against the 2026-05-26 broadcast bug:
+        # if load_bound_3a_pi ever ships un-deduped (V, L) keys again
+        # the left-merge silently multiplies df_lead's row count and
+        # the next numpy op blows up with a confusing shape mismatch.
+        # Fail loud + early with a useful message instead.
+        if len(df_lead_join) != len(df_lead):
+            raise ValueError(
+                f"lead {lead}h: 3a merge multiplied df_lead's {len(df_lead)} rows "
+                f"to {len(df_lead_join)} — duplicate (ValidTimeUtc, LeadHours) keys "
+                f"in 3a parquet. load_bound_3a_pi must dedupe."
+            )
         pi = df_lead_join["ProbWet"].to_numpy(dtype="float64")
         # Missing π rows: warn + drop (can't compute mixed dist without it).
         missing_pi = np.isnan(pi)
