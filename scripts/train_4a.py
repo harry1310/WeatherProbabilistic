@@ -114,11 +114,11 @@ _RCONVERT = default_converter + numpy2ri.converter + pandas2ri.converter
 ro.r(f'.libPaths(c("{_user_lib.replace(os.sep, "/")}", .libPaths()))')
 dbarts = importr("dbarts")
 
-NTREE = 500
-K = 3.0
-NSKIP = 200
-NDPOST = 1000
-SEED = 42
+NTREE = int(os.environ.get("WB_BART_NTREE", "500"))
+K = float(os.environ.get("WB_BART_K", "3.0"))
+NSKIP = int(os.environ.get("WB_BART_NSKIP", "200"))
+NDPOST = int(os.environ.get("WB_BART_NDPOST", "1000"))
+SEED = int(os.environ.get("WB_BART_SEED", "42"))
 PHASE = "4a"
 
 # Station slugs for the active location — bonehill_rocks by default,
