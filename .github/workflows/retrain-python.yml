@@ -121,10 +121,10 @@ jobs:
         # tempdir() fails with "Fail to create directory" — exactly what
         # killed run 25690642625 attempt 5.
         #
-        # Verified empty disk-recovery numbers via 5a-runner-smoke run on
-        # 2026-05-11: ~17 GB freed (less than the 40-50 GB initial
-        # estimate; .NET/Android were smaller than I assumed) but
-        # plenty for the install + swap chain.
+        # Verified empty disk-recovery numbers on 2026-05-11: ~17 GB
+        # freed (less than the 40-50 GB initial estimate; .NET/Android
+        # were smaller than I assumed) but plenty for the install + swap
+        # chain.
         run: |
           echo "--- df -h before cleanup ---"
           df -h /
