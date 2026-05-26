@@ -20,6 +20,7 @@ Contains:
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -32,6 +33,15 @@ sys.path.insert(0, str(ROOT))
 
 from src.data import LOCATION, WEATHERBLEND_DATA_ROOT, WET_THRESHOLD_MM  # noqa: E402
 from src.weatherblend_config import STATION_NAME_BY_SLUG  # noqa: E402, F401
+
+# WB_LOCATION env var is the per-matrix-job location selector that
+# retrain-python.yml sets. Phase B (2026-05-12) made train_4a/5a aware
+# of it for stations + metadata stamping, but build_features_via_duckdb
+# still queried the legacy module-level LOCATION constant — silently
+# producing 0 rows for any Membury matrix job. Resolved at module load
+# (not query time) since every script invocation gets a fresh process
+# with WB_LOCATION already set by the matrix step's env block.
+ACTIVE_LOCATION = os.environ.get("WB_LOCATION", LOCATION)
 
 # Mirrors PrecipFeatureBuilder.cs's lean spec — 7 NWPs, all optional, no required.
 # Order matters: matches `precip_<short>` column names in the C# pivot so any
@@ -132,7 +142,7 @@ def build_features_via_duckdb(
             date_trunc('hour', ObservedTimeUtc) AS valid_time,
             SUM(Value15MinMm) AS precip_mm_hour
         FROM read_parquet('{rn_glob}', hive_partitioning = false, union_by_name = true)
-        WHERE LocationName = '{LOCATION}'
+        WHERE LocationName = '{ACTIVE_LOCATION}'
           AND StationName  = '{station_friendly}'
           AND Value15MinMm IS NOT NULL
         GROUP BY 1
@@ -150,7 +160,7 @@ def build_features_via_duckdb(
                 ORDER BY RunTimeUtc DESC
             ) AS rn
         FROM read_parquet('{fc_glob}', hive_partitioning = false, union_by_name = true)
-        WHERE LocationName = '{LOCATION}'
+        WHERE LocationName = '{ACTIVE_LOCATION}'
           AND RunTimeSource = 'offset_day'
           AND LeadHours = {lead_hours}
           AND Model IN {model_in_clause}
@@ -249,7 +259,7 @@ def add_synoptic_features(station_friendly: str, lead_hours: int,
                 ORDER BY RunTimeUtc DESC
             ) AS rn
         FROM read_parquet('{fc_glob}', hive_partitioning = false, union_by_name = true)
-        WHERE LocationName = '{LOCATION}'
+        WHERE LocationName = '{ACTIVE_LOCATION}'
           AND RunTimeSource = 'offset_day'
           AND LeadHours = {lead_hours}
           AND Model IN {model_in_clause}
