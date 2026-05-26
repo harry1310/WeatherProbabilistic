@@ -348,6 +348,107 @@ def train_one_station(station_friendly: str, station_slug: str) -> dict:
 # Bundle writer
 # ----------------------------------------------------------------------------
 
+# ---- Test-set CRPS (drift baseline for RainfallAmountVerifyCommand) --------
+#
+# .NET RainfallAmountVerifyCommand reads `BlendTestMae` from this bundle's
+# training_metadata.json as the drift reference (1.5× threshold). For 3f
+# we repurpose the field to hold test-set CRPS so the verify drift path
+# stays single-pattern across temperature / precipitation / rainfall_amount.
+#
+# CRPS for the mixed (1-π)·δ_0 + π·LogNormal(μ,σ) distribution needs π,
+# which 3f doesn't own — it's supplied by Phase 3a at predict time. To
+# compute test-CRPS at TRAIN time we inner-join 3f's test_predictions
+# (μ, σ, observed_mm) with 3a's test_predictions (p_wet) on
+# (valid_time, station, lead). The two splits don't align perfectly
+# (3f trains on wet-only rows so its chronological 70/15/15 lands on
+# different dates than 3a's all-row split) — we score whatever overlaps.
+# When the overlap is empty for a lead, BlendTestMae stays None and
+# verify falls back to "no reference, no drift flag".
+
+_QUANTILE_ALPHAS = np.array([0.025, 0.10, 0.50, 0.90, 0.975])
+
+
+def _crps_mixed(pi: np.ndarray, quantiles: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Quantile-based estimator of CRPS for the mixed dry/wet predictive
+    distribution. Verbatim from
+    ``WP/scripts/run_membury_two_stage_ngboost.py:crps_mixed`` — duplicated
+    here so this script stays runnable without the bake-off module on
+    PYTHONPATH (matters in CI where the bake-off scripts are gated out).
+    Pinned bit-for-bit by the C# port in
+    ``Evaluate/RainfallAmount/RainfallAmountVerifier.CrpsMixed``."""
+    K = quantiles.shape[1]
+    w_dry = 1.0 - pi
+    w_wet = pi / K
+    term1 = w_dry * y + w_wet * np.abs(quantiles - y[:, None]).sum(axis=1)
+    cross_0k = 2.0 * w_dry * w_wet * quantiles.sum(axis=1)
+    pairwise = np.abs(quantiles[:, :, None] - quantiles[:, None, :]).sum(axis=(1, 2))
+    cross_kl = (w_wet ** 2) * pairwise
+    return term1 - 0.5 * (cross_0k + cross_kl)
+
+
+def compute_test_crps_per_lead(
+    test_predictions: pd.DataFrame,
+    models_root: Path,
+    station_slug: str,
+    bound_3a_version: str | None,
+) -> dict[int, float]:
+    """Returns {lead -> mean test-set CRPS} for the bundle's test slice.
+    Empty dict if 3a's test_predictions parquet is missing or the
+    (valid_time, lead) overlap with 3f's test slice is empty for every
+    lead. Caller stamps the result into per_lead_stats[lead]["BlendTestMae"]."""
+    if test_predictions.empty or not bound_3a_version:
+        return {}
+    pi_path = models_root / "precipitation" / station_slug / bound_3a_version / "test_predictions.parquet"
+    if not pi_path.exists():
+        log.warning(
+            "compute_test_crps_per_lead: 3a test_predictions not at %s — "
+            "BlendTestMae stays None; verify will see 'no reference'.",
+            pi_path,
+        )
+        return {}
+    try:
+        pi_df = pd.read_parquet(pi_path, columns=["valid_time", "lead", "p_wet"])
+    except Exception as ex:
+        log.warning("compute_test_crps_per_lead: failed to read %s (%s).", pi_path, ex)
+        return {}
+
+    # 3a writes valid_time as tz-naive UTC; 3f's score_test_slice already
+    # strips tz. Cast both to the same dtype before merging so pandas
+    # doesn't fall back to object-dtype keys (silent mismerge).
+    pi_df["valid_time"] = pd.to_datetime(pi_df["valid_time"]).dt.tz_localize(None)
+    tp = test_predictions.copy()
+    tp["valid_time"] = pd.to_datetime(tp["valid_time"]).dt.tz_localize(None)
+
+    merged = tp.merge(pi_df, on=["valid_time", "lead"], how="inner")
+    if merged.empty:
+        log.warning(
+            "compute_test_crps_per_lead: 3f test rows have zero overlap with 3a's "
+            "test slice for %s. BlendTestMae stays None.",
+            station_slug,
+        )
+        return {}
+
+    # Quantiles per row from LogNormal(μ, σ): q_k = exp(μ + σ · Φ⁻¹(α_k)).
+    from scipy.stats import norm  # type: ignore[import-not-found]
+    z = norm.ppf(_QUANTILE_ALPHAS)
+
+    per_lead: dict[int, float] = {}
+    for lead, grp in merged.groupby("lead"):
+        if grp.empty: continue
+        mu = grp["mu_log"].to_numpy(dtype="float64")
+        sigma = grp["sigma_log"].to_numpy(dtype="float64")
+        pi = grp["p_wet"].to_numpy(dtype="float64")
+        y = grp["observed_mm"].to_numpy(dtype="float64")
+        quantiles = np.exp(mu[:, None] + sigma[:, None] * z[None, :])
+        crps_vals = _crps_mixed(pi, quantiles, y)
+        per_lead[int(lead)] = float(crps_vals.mean())
+        log.info(
+            "  test CRPS lead %dh: %.4f (n=%d, joined with 3a %s)",
+            lead, per_lead[int(lead)], len(grp), bound_3a_version,
+        )
+    return per_lead
+
+
 def resolve_bound_3a_version(
     models_root: Path, station_slug: str,
 ) -> str | None:
@@ -445,6 +546,19 @@ def write_bundle(
         for lead in result["per_cell"]:
             n_te = int((result["test_predictions"]["lead"] == lead).sum())
             per_lead_stats[str(lead)]["TestRows"] = n_te
+
+    # Test-set CRPS — stamped into BlendTestMae for the .NET verify's
+    # drift baseline (1.5× threshold). See compute_test_crps_per_lead
+    # docstring for the join semantics. Stays None for leads with no
+    # overlap with 3a's test slice; verify treats null as "no drift
+    # reference" and the drift flag never fires for that cell.
+    models_root_for_crps = WEATHERBLEND_DATA_ROOT / "models"
+    test_crps_per_lead = compute_test_crps_per_lead(
+        result["test_predictions"], models_root_for_crps, station_slug, bound_3a_version,
+    )
+    for lead in result["per_cell"]:
+        if lead in test_crps_per_lead:
+            per_lead_stats[str(lead)]["BlendTestMae"] = test_crps_per_lead[lead]
 
     metadata = {
         "Version":      version,
