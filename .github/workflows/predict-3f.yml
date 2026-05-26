@@ -27,7 +27,7 @@ env:
 #       mixed-distribution: μ_log, σ_log, π, quantiles, exceedance probs)
 #
 # Failure path: the same /github-webhook handler in the Cloudflare
-# scheduler-worker that watches predict-4a / predict-5a opens a
+# scheduler-worker that watches predict-4a opens a
 # `[ci-fail] predict-3f` issue under the `ci-failure` label on
 # any failed run.
 
@@ -44,7 +44,7 @@ on:
         type: string
 
 concurrency:
-  # 3f writes to a distinct R2 prefix (rainfall_amount/) from 4a/5a
+  # 3f writes to a distinct R2 prefix (rainfall_amount/) from 4a
   # (precipitation/), so the per-repo lock is just to keep two close-
   # together cycles from racing each other on R2 reads.
   group: weatherprobabilistic-3f
@@ -93,7 +93,7 @@ jobs:
           EOF
 
       - name: Fetch WeatherBlend config.yaml from R2
-        # Same R2 bus pattern as predict-4a / predict-5a — src.weatherblend_config
+        # Same R2 bus pattern as predict-4a — src.weatherblend_config
         # reads this at import time to derive STATIONS_BY_LOCATION.
         env:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}

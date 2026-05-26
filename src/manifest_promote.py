@@ -3,17 +3,17 @@
 the .NET ``ModelArtifact.PromoteStationVersionAsChampion / AsChallenger``
 helpers in ``src/WeatherBlend/Train/ModelArtifact.cs``.
 
-Why this exists: every WB-side trainer (2b/2c/2d/3a/3c/3d/3e/3b/3g/element)
+Why this exists: every WB-side trainer (2b/2c/2d/3a/3c/3d/3b/3g/element)
 calls a Promote helper at the end of training to update MANIFEST.json so
-the new version surfaces in the site's Active list. The two Python-side
-trainers (`scripts/train_4a.py` for per-cell BART, `scripts/extend_5a.py`
-for the Bayesian INLA bundle) had no equivalent — they wrote bundle files
-to R2 but never touched the manifest. Result: predict workflows scored
-the new bundles, but the site only renders versions in Active, so freshly
-retrained 4a/5a fell off the site every Sunday and stayed off until
-someone hand-merged the manifest. Symptom (verified 2026-05-12 ~00:30
-UTC): "no 4a predictions on the site since midday May 10" — the per-cell
-4a refactor minted a new bundle name; nothing promoted it.
+the new version surfaces in the site's Active list. The Python-side
+trainer (`scripts/train_4a.py` for per-cell BART) had no equivalent — it
+wrote bundle files to R2 but never touched the manifest. Result: predict
+workflows scored the new bundles, but the site only renders versions in
+Active, so freshly retrained 4a fell off the site every Sunday and
+stayed off until someone hand-merged the manifest. Symptom (verified
+2026-05-12 ~00:30 UTC): "no 4a predictions on the site since midday
+May 10" — the per-cell 4a refactor minted a new bundle name; nothing
+promoted it.
 
 Usage::
 

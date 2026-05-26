@@ -73,10 +73,10 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 # Feature-build helpers + station registry live in scripts/_shared.py so
-# the production predict scripts (predict_4a / predict_5a) can use them
-# without dragging the bake-off-only deps (lightgbm, pymc_bart) onto the
-# import path. Re-exported here for back-compat with peer bake-off
-# scripts that import these names from this module.
+# the production predict scripts (predict_4a) can use them without
+# dragging the bake-off-only deps (lightgbm, pymc_bart) onto the import
+# path. Re-exported here for back-compat with peer bake-off scripts that
+# import these names from this module.
 from _shared import (  # noqa: E402,F401
     FEATURE_NAMES,
     MODELS_LEAN,

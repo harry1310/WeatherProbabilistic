@@ -455,7 +455,7 @@ def resolve_bound_3a_version(
     """Read ``data/models/precipitation/MANIFEST.json`` and return the
     newest Active entry on the station whose name contains no phase
     suffix — that's the 3a champion (3a bundles ship unsuffixed per the
-    .NET BuildStationVersionDir convention; 3c/3d/3o/4a/4b/5a all
+    .NET BuildStationVersionDir convention; 3c/3d/3o/4a/4b all
     carry _phaseXX suffixes).
 
     Returns None when the manifest has no 3a entry — caller logs +
@@ -690,7 +690,7 @@ def main() -> None:
 
         # RetrainGuard — same shape as 4a, against the previous 3f bundle.
         # Rows ±30% / NaN% absolute 0.20 / label-rate 0.10 defaults match
-        # the existing dbarts/INLA guard config.
+        # the existing dbarts guard config.
         guard_result = build_check_and_save_versioned(
             log,
             version_dir=bundle_dir,

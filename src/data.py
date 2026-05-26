@@ -36,8 +36,8 @@ from sklearn.preprocessing import StandardScaler
 
 # Local default points at the WeatherBlend sibling checkout on the dev
 # machine. CI / cron / non-Windows callers override via the
-# WEATHERBLEND_DATA_ROOT environment variable — the predict-5a.yml
-# workflow sets this to the runner-relative path it rclone-copies into.
+# WEATHERBLEND_DATA_ROOT environment variable — predict / retrain
+# workflows set this to the runner-relative path they rclone-copy into.
 WEATHERBLEND_DATA_ROOT = Path(
     os.environ.get("WEATHERBLEND_DATA_ROOT")
     or r"C:/Projects/Weather/WeatherBlend/data"
@@ -108,11 +108,6 @@ def stations_for_location(location: str) -> tuple[str, ...]:
 
 LEAD_HOURS = 24
 PHASE3_LEAD_HOURS: tuple[int, ...] = (24, 48, 72)
-# Phase 5a (lead-as-feature INLA) extends the lead horizon — `lead`
-# is a feature, so a single posterior scores every row regardless of
-# bucket. Two extra leads (96, 120) cover the +4d/+5d ahead window
-# where the live forecast tree has data and the EA truth lands.
-PHASE5A_LEAD_HOURS: tuple[int, ...] = (24, 48, 72, 96, 120)
 WET_THRESHOLD_MM = 0.1
 MAX_NULL_FRACTION = 0.5  # drop any feature column that is more than half null
 
@@ -393,9 +388,9 @@ def _load_all_forecasts_multi_lead_rich(
     forecasts = fc_frames[0]
     for fc in fc_frames[1:]:
         # Outer-join so a row survives when AT LEAST ONE NWP has a precip
-        # value at (ValidTimeUtc, LeadHours). Inner-join used to drop
-        # any row where any one of the configured NWPs was missing — that
-        # implicitly capped 5a's lead horizon at meteofrance_seamless's
+        # value at (ValidTimeUtc, LeadHours). Inner-join used to drop any
+        # row where any one of the configured NWPs was missing — that
+        # implicitly capped the lead horizon at meteofrance_seamless's
         # archive limit (72h). Outer-join + median-imputation of per-model
         # precip columns at long leads mirrors what 3a/4a do via the SQL
         # AVG + per-cell column-drop pattern, just in pandas.
@@ -654,15 +649,12 @@ def prepare_phase3_dataset(
     ``feature_set`` selects the feature shape:
       - ``"minimal"`` (default, 8 features): per-model precip + hour_sin/cos.
         With ``add_spread_features=True`` adds precip_max +
-        precip_agreement_wet_01 (10 features). The historical 5a default.
+        precip_agreement_wet_01 (10 features).
       - ``"full"`` (20 features pre-lead): the 3a/4a feature set —
         per-model precip + precip_{mean,std,max,agreement_wet01} +
         atmospheric ensemble means (rh, cloud_low/mid/high, cape,
         wind_speed, dew_depression) + cyclic hour_sin/cos + doy_sin/cos.
-        Adds another column when lead_as_feature=True. Promoted for
-        5a INLA backend 2026-05-11 — closer feature parity with 3a/4a
-        lets the hierarchical logreg condition on the same signals the
-        tree-based champions use.
+        Adds another column when lead_as_feature=True.
     """
     if feature_set == "full":
         forecasts, precip_cols = _load_all_forecasts_multi_lead_rich(
@@ -676,8 +668,7 @@ def prepare_phase3_dataset(
     # Optional training-data cutoff (2026-05-26 — see src.phase_registry).
     # Clip the forecasts DataFrame BEFORE the truth merge + scaler fit so
     # the cutoff propagates to every downstream consumer (train/val/test
-    # slicing, StandardScaler fit, posterior fit). 5a's run_phase5_bayesian
-    # passes precipitation/5a's minValidTime here; bake-off scripts that
+    # slicing, StandardScaler fit, posterior fit). Bake-off scripts that
     # want full history pass None.
     if min_valid_time is not None:
         before = len(forecasts)
@@ -687,12 +678,9 @@ def prepare_phase3_dataset(
 
     # Optional spread features mirroring 3a/4a's non-linear inputs:
     # precip_max captures "at least one NWP says wet", precip_agreement_wet_01
-    # captures "what fraction of NWPs cross the 0.1 mm/h threshold". A linear
-    # logistic regression can't represent these AND-conditions across raw
-    # precip inputs, so adding them as pre-computed scalars lets 5a's LR
-    # reach the dry tail (P(wet) → ~0 when all NWPs are at zero) the way
-    # tree-based 3a/4a do. Computed on the inner-joined forecast rows so
-    # every station sees the same spread features per (valid_time, lead).
+    # captures "what fraction of NWPs cross the 0.1 mm/h threshold".
+    # Computed on the inner-joined forecast rows so every station sees the
+    # same spread features per (valid_time, lead).
     if add_spread_features:
         pm_arr = forecasts[precip_cols].to_numpy(dtype="float64")
         forecasts["precip_max"] = np.nanmax(pm_arr, axis=1)

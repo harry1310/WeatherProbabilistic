@@ -19,17 +19,3 @@ data/cache/
 # until the bundle grows enough to warrant LFS or an R2-side artefact store.
 !reports/phase4_artefacts/bayesian_predictions/posteriors/*.nc
 
-# Phase 5a bundle: NOT tracked in git. retrain-python.yml pushes to
-# r2:${R2_BUCKET}/reports/phase5a_artefacts/ at every fit, predict-5a.yml
-# pulls the same paths at every cron tick. Matches the 4a pattern
-# (predict-4a.yml rclone-pulls data/models/precipitation/**/*phase4a*/**).
-# The previous "track posterior .nc in git" exception above (now removed)
-# meant predict-5a effectively pinned to whatever was last committed,
-# auto-retrain on R2 couldn't take effect, and bundle binaries bloated
-# the repo. Note: training_summary.json + the research CSVs at the
-# phase5a_artefacts/ root level remain tracked (small text, useful diffs).
-reports/phase5a_artefacts/live_bundle/
-reports/phase5a_artefacts/posteriors/
-reports/phase5a_artefacts/predictions/
-reports/phase5a_artefacts_spread/live_bundle/
-reports/phase5a_artefacts_spread/posteriors/

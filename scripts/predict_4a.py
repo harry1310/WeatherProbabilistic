@@ -375,7 +375,7 @@ def write_predictions_parquet(predictions_root: Path, station_slug: str,
                               bundle_name: str, anchor: datetime,
                               predictions: pd.DataFrame) -> Path:
     """Append-friendly write under model_version=<version>/date=<anchor>/.
-    Same pattern as predict_4a.py / predict_5a.py: one parquet per
+    Same pattern as predict_4a.py: one parquet per
     (station, model_version, anchor-date) cycle."""
     date_str = anchor.date().isoformat()
     out_dir = (predictions_root / "precipitation" / station_slug

@@ -4,7 +4,7 @@ the next retrain by :mod:`retrain_guard` to detect upstream data shifts
 before a bad model gets written.
 
 Mirrors the .NET ``WeatherBlend.Train.Common.TrainingSummary`` schema
-exactly (PascalCase keys, same field shape) so a 4a / 5a summary is
+exactly (PascalCase keys, same field shape) so a 4a / 3f summary is
 interchangeable with a 2b / 3a one. The .NET serialiser uses
 ``System.Text.Json`` defaults which write PascalCase property names;
 this module emits the same so a Python-trained phase's summary parses
@@ -50,10 +50,6 @@ class TrainingSummary:
     Composite is the same key the site's ``ModelSummary`` uses so a
     Python-side guard's ``try_load_previous_summary`` can resolve the
     same lineage the .NET trainer would.
-
-    For 5a (single hierarchical model across all stations + leads), use
-    composite ``"precipitation_5a"`` and put per-station label rates in
-    ``LabelRates`` keyed by station slug.
     """
 
     SchemaVersion: str = SCHEMA_VERSION
@@ -146,8 +142,7 @@ def build_summary(
 ) -> TrainingSummary:
     """Compose a complete TrainingSummary. Convenience wrapper that ties
     the per-feature stats to the metadata fields. Caller is responsible
-    for the train/val/test row counts — typically aggregated across the
-    lead-as-feature pool for 4a/5a.
+    for the train/val/test row counts.
     """
     when = computed_at_utc or datetime.now(timezone.utc)
     return TrainingSummary(
@@ -178,13 +173,11 @@ def from_json(path: Path | str) -> TrainingSummary | None:
     """Load from disk; returns None if the file doesn't exist. Tolerates
     extra fields (forwards-compat with future schema bumps).
 
-    Legacy handling (added 2026-05-25 after the 5a auto-retrain stalled
-    for 2 weeks on a pre-2026-05-12 summary written before LocationName
-    was required): if the file exists but its top-level dict is missing
-    the LocationName *key entirely*, treat as a pre-tightening write —
-    warn loudly and return None so the caller skips it as if absent.
-    First successful retrain after this overwrites with a current-schema
-    summary, restoring normal baseline-checking.
+    Legacy handling (added 2026-05-25): if the file exists but its
+    top-level dict is missing the LocationName *key entirely*, treat as
+    a pre-2026-05-12 write — warn loudly and return None so the caller
+    skips it as if absent. First successful retrain after this overwrites
+    with a current-schema summary, restoring normal baseline-checking.
 
     The strict ValueError in `_from_dict` still fires when LocationName
     *is* present but blank/whitespace — that's a real corrupt write, not

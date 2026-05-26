@@ -1,7 +1,7 @@
 """Regression for the 2026-05-26 silent-zero-rows bug in
 ``scripts/_shared.build_features_via_duckdb``.
 
-Phase B (2026-05-12) made ``train_4a`` / ``train_5a`` aware of
+Phase B (2026-05-12) made ``train_4a`` aware of
 ``WB_LOCATION`` via an ``ACTIVE_LOCATION = os.environ.get("WB_LOCATION",
 LOCATION)`` hoist at the top of each script. But the underlying
 ``_shared`` helper ``build_features_via_duckdb`` kept querying the
@@ -15,8 +15,8 @@ DuckDB for every (Membury station, lead) cell.
 Surfaced by the first live Membury 3f training attempt (retrain-python
 run 26444751915 on 2026-05-26) — train_3f reported "loaded 0 rows
 (wet 0.0%)" for every (station, lead) pair and the workflow exited
-with "0 bundles written". Would have hit Membury 4a/5a the same way
-if either had ever been dispatched in production before this date.
+with "0 bundles written". Would have hit Membury 4a the same way
+had it ever been dispatched in production before this date.
 
 Fix (commit 4586e34): hoist ``ACTIVE_LOCATION`` at module load of
 ``_shared.py`` so it picks up ``WB_LOCATION`` from the matrix step's

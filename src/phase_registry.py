@@ -1,13 +1,13 @@
 """Python-side phase registry loader.
 
 Mirrors WeatherBlend's ``Models/PhaseRegistry.cs`` for the Python phases
-(currently 4a / 5a / 3f). Reads ``phases.yaml`` from the same R2-fetched
+(currently 4a / 3f). Reads ``phases.yaml`` from the same R2-fetched
 location every other WP script uses (``./config/phases.yaml``, with
 sibling-checkout fallback for local dev) and exposes the fields each
 script consumes.
 
 Today only ``min_valid_time`` is consumed (2026-05-26 — see
-``project_3a_3b_data_drift_2026-05-26`` memory): 4a / 5a carry
+``project_3a_3b_data_drift_2026-05-26`` memory): 4a carries
 ``minValidTime: "2024-01-01"`` in ``phases.yaml`` because the
 JMA-extension surfaced that pre-2024 NWP archives are NULL-padded,
 diluting the training signal. 3f does NOT (Membury-only, data

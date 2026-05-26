@@ -1,7 +1,7 @@
 """Shared helpers used by both production predict scripts and bake-off
-scripts. Lives here so production code (predict_4a, predict_5a) doesn't
-have to drag bake-off-only deps (lightgbm, pymc_bart, rpy2.dbarts) onto
-its critical path.
+scripts. Lives here so production code (predict_4a) doesn't have to drag
+bake-off-only deps (lightgbm, pymc_bart, rpy2.dbarts) onto its critical
+path.
 
 Strict policy: imports in this module MUST stay light — pure stdlib +
 duckdb / numpy / pandas / src.data. No lightgbm, no pymc, no pymc_bart,
@@ -35,7 +35,7 @@ from src.data import LOCATION, WEATHERBLEND_DATA_ROOT, WET_THRESHOLD_MM  # noqa:
 from src.weatherblend_config import STATION_NAME_BY_SLUG  # noqa: E402, F401
 
 # WB_LOCATION env var is the per-matrix-job location selector that
-# retrain-python.yml sets. Phase B (2026-05-12) made train_4a/5a aware
+# retrain-python.yml sets. Phase B (2026-05-12) made train_4a aware
 # of it for stations + metadata stamping, but build_features_via_duckdb
 # still queried the legacy module-level LOCATION constant — silently
 # producing 0 rows for any Membury matrix job. Resolved at module load

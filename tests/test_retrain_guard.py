@@ -1,7 +1,7 @@
 """Tests for the Python RetrainGuard mirror of WeatherBlend's .NET guard.
 
 The .NET equivalent (RetrainGuardTests.cs) covers the same scenarios;
-keeping this suite in lockstep is what guarantees a 4a / 5a guard
+keeping this suite in lockstep is what guarantees a 4a / 3f guard
 fires on the same upstream-data shifts that trip 2b / 3a.
 """
 from __future__ import annotations
@@ -16,10 +16,8 @@ import pytest
 from src.retrain_guard import (
     DEFAULTS,
     GuardTolerances,
-    build_check_and_save_singleton,
     build_check_and_save_versioned,
     check,
-    try_load_previous_summary_singleton,
     try_load_previous_summary_versioned,
 )
 from src.training_summary import (
@@ -269,61 +267,6 @@ def test_build_check_and_save_versioned_does_not_write_on_fail(tmp_path):
     )
 
 
-def test_build_check_and_save_singleton_overwrites_on_pass(tmp_path):
-    log = logging.getLogger("test")
-    summary_path = tmp_path / "training_summary.json"
-
-    # Seed the existing file.
-    prev = build_summary(
-        composite="precipitation_5a", phase="5a", version="v-old",
-        rows_train=10_000, rows_val=2_000, rows_test=2_000,
-        train_features=_make_features(100, 3),
-        feature_names=["a", "b", "c"],
-        location_name="bonehill_rocks",
-    )
-    to_json(prev, summary_path)
-
-    # Within tolerance — overwrites.
-    result = build_check_and_save_singleton(
-        log, summary_path,
-        composite="precipitation_5a", phase="5a", version="v-new",
-        rows_train=10_500, rows_val=1_950, rows_test=2_050,
-        train_features=_make_features(100, 3),
-        feature_names=["a", "b", "c"],
-        location_name="bonehill_rocks",
-    )
-    assert result.passed
-    saved = from_json(summary_path)
-    assert saved.Version == "v-new", "singleton path must overwrite on pass"
-
-
-def test_build_check_and_save_singleton_does_not_overwrite_on_fail(tmp_path):
-    log = logging.getLogger("test")
-    summary_path = tmp_path / "training_summary.json"
-
-    prev = build_summary(
-        composite="precipitation_5a", phase="5a", version="v-old",
-        rows_train=10_000, rows_val=2_000, rows_test=2_000,
-        train_features=_make_features(100, 3),
-        feature_names=["a", "b", "c"],
-        location_name="bonehill_rocks",
-    )
-    to_json(prev, summary_path)
-
-    # Row drop > 30% — guard fails, file should still say v-old.
-    result = build_check_and_save_singleton(
-        log, summary_path,
-        composite="precipitation_5a", phase="5a", version="v-new",
-        rows_train=2_000, rows_val=400, rows_test=400,
-        train_features=_make_features(100, 3),
-        feature_names=["a", "b", "c"],
-        location_name="bonehill_rocks",
-    )
-    assert not result.passed
-    saved = from_json(summary_path)
-    assert saved.Version == "v-old", "guard FAIL must preserve previous singleton baseline"
-
-
 def test_build_check_and_save_skips_when_features_empty(tmp_path):
     log = logging.getLogger("test")
     version_dir = tmp_path / "ea_test" / "v-current"
@@ -373,15 +316,10 @@ def test_try_load_previous_summary_versioned_returns_none_on_empty_dir(tmp_path)
     assert found is None
 
 
-def test_try_load_previous_summary_singleton_returns_none_on_first_train(tmp_path):
-    found = try_load_previous_summary_singleton(tmp_path / "training_summary.json")
-    assert found is None
-
-
 # ----- LocationName required-at-load (Task #21, revised 2026-05-25) ----
 #
 # Original Task #21 made from_json refuse ANY summary without LocationName.
-# In practice this stalled the 5a auto-retrain for 2 weeks against a
+# In practice this stalled an auto-retrain for 2 weeks against a
 # pre-2026-05-12 R2 summary nobody had cleaned up. The 2026-05-25 revision
 # splits the two failure modes:
 #
@@ -402,8 +340,8 @@ def test_from_json_returns_none_for_legacy_file_without_location_name(tmp_path, 
     path = tmp_path / "training_summary.json"
     path.write_text(json.dumps({
         "SchemaVersion": "1",
-        "Composite": "precipitation_5a",
-        "Phase": "5a",
+        "Composite": "precipitation/ea_test",
+        "Phase": "4a",
         "PerFeature": {},
     }))
     with caplog.at_level("WARNING"):
@@ -418,7 +356,7 @@ def test_from_json_raises_when_location_name_blank(tmp_path):
     path = tmp_path / "training_summary.json"
     path.write_text(json.dumps({
         "SchemaVersion": "1",
-        "Composite": "precipitation_5a",
+        "Composite": "precipitation/ea_test",
         "LocationName": "  ",
     }))
     with pytest.raises(ValueError, match="LocationName"):

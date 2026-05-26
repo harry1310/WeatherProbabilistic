@@ -7,7 +7,7 @@ Pins:
   * Absent / unknown phases return ``None`` (= no cutoff at the call site).
   * Invalid date strings raise with target+phase context.
   * The shipped ``phases.yaml`` carries ``minValidTime: "2024-01-01"``
-    on 4a + 5a (the Python-side cutoff phases) — regression for the
+    on 4a (the Python-side cutoff phase) — regression for the
     2026-05-26 JMA-extension data-drift decision.
 """
 from __future__ import annotations
@@ -71,7 +71,7 @@ targets:
 """
     reg = PhaseRegistry.load(_write(tmp_path, yaml_text))
     # Unknown phase is "no cutoff", same semantics as absent field.
-    assert reg.min_valid_time_for("precipitation", "5a") is None
+    assert reg.min_valid_time_for("precipitation", "9z") is None
     assert reg.min_valid_time_for("nonexistent_target", "anything") is None
 
 
@@ -112,7 +112,7 @@ targets:
 
 def test_production_phases_yaml_pins_2024_cutoff_on_python_phases():
     """Sibling-checkout fallback: load the actual WB-side phases.yaml.
-    Locks the 2026-05-26 decision in the shipped YAML for 4a + 5a.
+    Locks the 2026-05-26 decision in the shipped YAML for 4a.
     """
     # Sibling-checkout path the loader falls back to in dev.
     sibling = (Path(__file__).resolve().parent.parent.parent
@@ -122,6 +122,5 @@ def test_production_phases_yaml_pins_2024_cutoff_on_python_phases():
     reg = PhaseRegistry.load(sibling)
     expected = datetime(2024, 1, 1, tzinfo=__import__("datetime").timezone.utc)
     assert reg.min_valid_time_for("precipitation", "4a") == expected
-    assert reg.min_valid_time_for("precipitation", "5a") == expected
     # 3f is Membury-only, data starts 2024 anyway → no cutoff.
     assert reg.min_valid_time_for("rainfall_amount", "3f") is None

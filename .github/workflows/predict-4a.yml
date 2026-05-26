@@ -14,8 +14,7 @@ env:
 # by retrain-python.yml (phase 4a), applies it to fresh live forecast
 # features, writes
 # predictions parquet under the existing version. Runs 4× per day on the
-# Cloudflare 03/09/15/21 UTC tick (same tick as predict-5a, different
-# repo + R2 prefix so no contention).
+# Cloudflare 03/09/15/21 UTC tick.
 #
 # Pre-split this workflow ALSO trained on each daily run (~24 min wall).
 # Now training is its own workflow; the predict cycle just rehydrates
@@ -41,10 +40,8 @@ on:
         type: string
 
 concurrency:
-  # Per-repo lock — predict-5a.yml writes to a different prefix
-  # (*phase5a* vs *phase4a*) so no shared lock between them. Per-anchor
-  # serialisation via the cron group keeps two close-together cycles
-  # from racing each other on R2 reads.
+  # Per-anchor serialisation via the cron group keeps two close-together
+  # cycles from racing each other on R2 reads.
   group: weatherprobabilistic-4a
   cancel-in-progress: false
 

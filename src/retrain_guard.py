@@ -1,5 +1,5 @@
 """Pre-train sanity gate for the WeatherProbabilistic Python phases (4a
-BART, 5a Bayesian logreg). Mirror of WeatherBlend's
+BART, 3f NGBoost-LogNormal). Mirror of WeatherBlend's
 ``WeatherBlend.Train.Common.RetrainGuard`` so a Python-trained phase's
 guard behaviour matches a .NET-trained phase's exactly: same tolerance
 bands, same breach reasons, same first-ever-train passing semantics.
@@ -21,11 +21,6 @@ Usage from a trainer script::
     )
     if not result.passed:
         sys.exit(4)   # workflow webhook fires [ci-fail] retrain-* issue
-
-For 5a (single hierarchical model, overwrite-style bundle), use
-``build_check_and_save_singleton`` which compares against whatever the
-existing ``training_summary.json`` says was last written and overwrites
-on pass.
 """
 from __future__ import annotations
 
@@ -280,14 +275,6 @@ def try_load_previous_summary_versioned(
     return None
 
 
-def try_load_previous_summary_singleton(path: Path) -> TrainingSummary | None:
-    """For overwrite-style bundles (5a layout — one summary file, gets
-    overwritten each run). The "previous" is whatever's currently on
-    disk. Returns None on first-ever train when the file doesn't exist.
-    """
-    return load_summary(Path(path))
-
-
 # ----- trainer-facing entry points -------------------------------------
 
 
@@ -323,40 +310,6 @@ def build_check_and_save_versioned(
         log,
         save_path=version_dir / "training_summary.json",
         previous=try_load_previous_summary_versioned(parent_dir, phase, version_dir.name),
-        composite=composite, phase=phase, version=version,
-        rows_train=rows_train, rows_val=rows_val, rows_test=rows_test,
-        train_features=train_features, feature_names=feature_names,
-        label_rates=label_rates, tolerances=tolerances,
-        location_name=location_name,
-    )
-
-
-def build_check_and_save_singleton(
-    log: logging.Logger,
-    summary_path: Path,
-    composite: str,
-    phase: str,
-    version: str,
-    rows_train: int,
-    rows_val: int,
-    rows_test: int,
-    train_features,  # np.ndarray
-    feature_names: list[str],
-    label_rates: dict[str, float] | None = None,
-    tolerances: GuardTolerances = DEFAULTS,
-    location_name: str | None = None,
-) -> GuardResult:
-    """Singleton-bundle entry point (5a). Loads the existing summary at
-    ``summary_path`` as the "previous" baseline, runs the guard, and on
-    pass overwrites the file with the new summary. On fail, leaves the
-    existing file untouched so the next retrain attempt sees the same
-    baseline.
-    """
-    summary_path = Path(summary_path)
-    return _run_guard(
-        log,
-        save_path=summary_path,
-        previous=try_load_previous_summary_singleton(summary_path),
         composite=composite, phase=phase, version=version,
         rows_train=rows_train, rows_val=rows_val, rows_test=rows_test,
         train_features=train_features, feature_names=feature_names,

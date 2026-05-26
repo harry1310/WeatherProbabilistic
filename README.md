@@ -24,15 +24,6 @@ deliberately separate.
   fix Bayesian's miscalibration vs LightGBM. ECE drops -34.5% (0.079 →
   0.052), now better-calibrated than either LightGBM variant. See
   `reports/phase4_isotonic_report.md`.
-- **Phase 5 — Monte Carlo dry-window simulation.** Application phase:
-  uses Phase 3 Model A posterior + Phase 4.5 calibrators to produce
-  decision-relevant **distributions** (not point estimates) over
-  longest-dry-run length, P(window of length L exists), window-start
-  times, and user-specified time-range probabilities. The killer
-  application of Bayesian thinking for this domain — LightGBM literally
-  can't natively produce these. Library code under `src/simulation/`,
-  driver `scripts/run_phase5.py`, report `reports/phase5_report.md`.
-
 ## Setup
 
 ```bash
@@ -57,7 +48,6 @@ instead, install MSVC Build Tools or the conda `m2w64-toolchain`.
 .venv/Scripts/python.exe scripts/run_phase4_lightgbm_native.py # phase 4 LGB native
 .venv/Scripts/python.exe scripts/run_phase4_compare.py         # phase 4 comparison
 .venv/Scripts/python.exe scripts/run_phase4_isotonic.py        # phase 4.5 calibration
-.venv/Scripts/python.exe scripts/run_phase5.py                 # phase 5 MC simulation
 ```
 
 Outputs land in `reports/`.
