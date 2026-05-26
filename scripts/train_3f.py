@@ -424,11 +424,15 @@ def write_bundle(
             "ValRows":     cell["n_val_wet"],
             "TestRows":    0,  # filled below from the test_predictions
             "BestSingle":  "ngboost_lognormal",
-            "BlendTestMae": float("nan"),  # verify_3f.py computes the actual CRPS
-            "BlendTestRmse": float("nan"),
-            "BlendTestBias": float("nan"),
-            "BestSingleValMae":  float("nan"),
-            "BestSingleTestMae": float("nan"),
+            # Strict JSON (allow_nan=False below) refuses NaN literals;
+            # use None -> null instead. Means-NA semantics carry through
+            # for any reader. verify_3f.py computes the actual CRPS, so
+            # these MAE/RMSE/Bias fields are inherently N/A at train time.
+            "BlendTestMae":      None,
+            "BlendTestRmse":     None,
+            "BlendTestBias":     None,
+            "BestSingleValMae":  None,
+            "BestSingleTestMae": None,
             "DataRangeTrain": "",
             "DataRangeVal":   "",
             "DataRangeTest":  "",
