@@ -282,7 +282,7 @@ def train_one_station(station_friendly: str, station_slug: str) -> dict:
     features the RetrainGuard needs."""
     per_cell: dict[int, dict] = {}
     test_pred_frames: list[pd.DataFrame] = []
-    train_features_first_lead: list[list[float]] | None = None
+    train_features_first_lead: np.ndarray | None = None
     train_label_rate_first_lead: float = 0.0
     rows_train_total = 0
     rows_val_total = 0
@@ -307,9 +307,11 @@ def train_one_station(station_friendly: str, station_slug: str) -> dict:
         # RetrainGuard features: lift the FIRST trained lead's TRAIN slice
         # (wet+dry, not the wet-only filter) so the guard's row count +
         # NaN ratio + label-rate match what the upstream feature builder
-        # produced.
+        # produced. Must be a 2D numpy ndarray — training_summary's
+        # compute_feature_stats calls X.shape and X.mean(axis=0).
+        # train_4a passes the same shape via canonical["X_train_s"].
         if train_features_first_lead is None and len(df_tr):
-            train_features_first_lead = df_tr[FEATURE_NAMES].to_numpy(dtype="float32").tolist()
+            train_features_first_lead = df_tr[FEATURE_NAMES].to_numpy(dtype="float32")
             train_label_rate_first_lead = float(df_tr["wet"].mean())
 
         cell = fit_one_lead(df_tr, df_va, lead, station_slug)
@@ -329,7 +331,12 @@ def train_one_station(station_friendly: str, station_slug: str) -> dict:
     return dict(
         per_cell=per_cell,
         test_predictions=test_predictions,
-        train_features=train_features_first_lead or [],
+        # `or [...]` truth-test on an ndarray raises; check for None.
+        train_features=(
+            train_features_first_lead
+            if train_features_first_lead is not None
+            else np.zeros((0, len(FEATURE_NAMES)), dtype="float32")
+        ),
         train_label_rate=train_label_rate_first_lead,
         rows_train_total=rows_train_total,
         rows_val_total=rows_val_total,
