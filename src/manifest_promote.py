@@ -3,7 +3,7 @@
 the .NET ``ModelArtifact.PromoteStationVersionAsChampion / AsChallenger``
 helpers in ``src/WeatherBlend/Train/ModelArtifact.cs``.
 
-Why this exists: every WB-side trainer (2b/2c/2d/3a/3c/3d/3b/3g/element)
+Why this exists: every WB-side trainer (2b/2c/2d/3a/3c/3d/3b/3p/element)
 calls a Promote helper at the end of training to update MANIFEST.json so
 the new version surfaces in the site's Active list. The Python-side
 trainer (`scripts/train_4a.py` for per-cell BART) had no equivalent — it
