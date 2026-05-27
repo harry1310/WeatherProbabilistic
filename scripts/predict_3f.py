@@ -37,7 +37,7 @@ import pickle
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -203,7 +203,31 @@ def build_live_features(anchor: datetime) -> pd.DataFrame:
 # Bound 3a join
 # ----------------------------------------------------------------------------
 
-def _resolve_3a_parquet_with_fallback(
+# Max age (days) of an acceptable bound-3a version. The on-disk scan
+# below filters by this so a forgotten/orphan 3a from months ago can't
+# silently be picked up if today's 3a predict pipeline broke. Defaults
+# to 30 days — covers the worst-case "Sunday auto-retrain skipped for
+# two weeks in a row" scenario with margin, but stops at "this isn't
+# a current 3a anymore" before that.
+MAX_3A_AGE_DAYS = 30
+_VERSION_TS_RE = re.compile(r"^v(\d{4}-\d{2}-\d{2})_(\d{6})$")
+
+
+def _parse_3a_version_ts(version: str) -> datetime | None:
+    """Pull the timestamp out of a v{yyyy-MM-dd}_{HHmmss} 3a version
+    name. Returns None for any name that doesn't match the convention
+    (which would also be filtered out by the _phase suffix check, but
+    we double-check here so an oddly-named orphan can't pass)."""
+    m = _VERSION_TS_RE.match(version)
+    if not m:
+        return None
+    try:
+        return datetime.fromisoformat(f"{m.group(1)}T{m.group(2)[:2]}:{m.group(2)[2:4]}:{m.group(2)[4:]}")
+    except ValueError:
+        return None
+
+
+def _resolve_3a_parquet(
     predictions_root: Path,
     station_slug: str,
     precip_3a_version: str,
@@ -211,61 +235,68 @@ def _resolve_3a_parquet_with_fallback(
 ) -> tuple[Path, str]:
     """Return (parquet path, resolved version) for today's bound 3a π.
 
-    Preferred path: the version stamped into the 3f bundle's metadata.
-    Fallback: if the stamped version's parquet is missing at today's
-    anchor, scan the station's predictions tree for any unsuffixed
-    (= 3a — 3c/3d/3o/4a/4b all carry _phaseXX) sibling that DOES have
-    today's parquet and pick the freshest by lexicographic max.
+    Always picks the LATEST 3a *phase* champion on disk that has
+    today's parquet, regardless of which 3a version the 3f bundle
+    happened to stamp at train time. The stamped version is logged
+    for audit but doesn't gate the read — Sunday auto-retrain can
+    re-train 3a between 3f train and 3f predict, and we want the
+    freshest π every cycle.
 
-    Motivated by the 2026-05-27 06:35Z predict-3f failure: 3f trained
-    at 2026-05-26 10:24 stamped 3a v2026-05-24_141845, but Sunday's
-    auto-retrain re-trained 3a at 10:27 → newer 3a writes predictions
-    to v2026-05-26_102758/date=today, leaving the stamped version's
-    folder without today's parquet. Stale-stamp shouldn't black-hole
-    every 3f cycle until the next 3f train rebinds.
+    What "latest 3a phase" means here:
+      * Unsuffixed model_version=v{ts} folder (= 3a champion convention;
+        3c/3d/3o/4a/4b all carry _phaseXX suffixes — explicitly excluded).
+      * Version timestamp parses to a real datetime and is within the
+        last MAX_3A_AGE_DAYS of the anchor. Orphan bundles from months
+        ago are filtered out so a broken 3a pipeline can't quietly be
+        masked by a stale predictions parquet.
+      * Today's parquet exists at model_version={v}/date={anchor}/.
+      * Of the remaining candidates, lexicographic max wins — version
+        names start with v{yyyy-MM-dd_HHmmss} so lex order == chrono
+        order.
 
-    Raises FileNotFoundError when neither the stamp nor any unsuffixed
-    sibling has today's parquet — predict_3f without a π source can't
-    proceed.
+    Raises FileNotFoundError when no candidate survives — predict_3f
+    without a π source can't proceed and we fail loud rather than
+    silently emit zero rows.
     """
     date_str = anchor.date().isoformat()
     station_dir = predictions_root / "precipitation" / station_slug
-    preferred = (
-        station_dir / f"model_version={precip_3a_version}"
-                    / f"date={date_str}" / "predictions.parquet"
-    )
-    if preferred.is_file():
-        return preferred, precip_3a_version
+    min_ts = anchor - timedelta(days=MAX_3A_AGE_DAYS)
 
-    # Fallback: any unsuffixed model_version=* sibling whose today/
-    # parquet exists. Order by version-name lex max so the freshest
-    # 3a champion wins. _phaseXX-suffixed dirs are 3c/3d/3o/4a/4b —
-    # not 3a, never used here.
-    candidates: list[tuple[str, Path]] = []
+    candidates: list[tuple[str, Path, datetime]] = []
     if station_dir.is_dir():
         for d in station_dir.iterdir():
             if not d.is_dir() or not d.name.startswith("model_version="):
                 continue
             version = d.name[len("model_version="):]
             if "_phase" in version:
+                # 3c / 3d / 3o / 4a / 4b — not the 3a marginal we need.
+                continue
+            ts = _parse_3a_version_ts(version)
+            if ts is None or ts < min_ts:
                 continue
             today_path = d / f"date={date_str}" / "predictions.parquet"
             if today_path.is_file():
-                candidates.append((version, today_path))
+                candidates.append((version, today_path, ts))
     if not candidates:
         raise FileNotFoundError(
-            f"bound Phase 3a predictions parquet missing: {preferred}. "
-            f"3f cannot mix without π — neither the stamped version "
-            f"({precip_3a_version}) nor any unsuffixed sibling has today's "
-            f"parquet. Either today's predict-all step hasn't run yet for "
-            f"3a, or the predictions tree is empty for this station."
+            f"bound Phase 3a predictions parquet missing for {station_slug} "
+            f"at {date_str}: no unsuffixed (= 3a) model_version=* folder "
+            f"under {station_dir} has today's parquet AND a version "
+            f"timestamp within the last {MAX_3A_AGE_DAYS} days. "
+            f"Either today's predict-all step hasn't run yet for 3a, "
+            f"3a hasn't been re-trained in the window, or the predictions "
+            f"tree is empty for this station. Bundle stamp was "
+            f"'{precip_3a_version}' (informational only — always picks "
+            f"latest from disk)."
         )
     candidates.sort(key=lambda c: c[0])
-    chosen_version, chosen_path = candidates[-1]
-    log.warning(
-        "  bound 3a stamp %s has no parquet at %s; using on-disk fallback %s",
-        precip_3a_version, date_str, chosen_version,
-    )
+    chosen_version, chosen_path, _ = candidates[-1]
+    if chosen_version != precip_3a_version:
+        log.info(
+            "  bound 3a stamp %s → resolved to latest 3a-phase champion %s "
+            "(stamp is informational; resolver always picks latest on disk).",
+            precip_3a_version, chosen_version,
+        )
     return chosen_path, chosen_version
 
 
@@ -293,7 +324,7 @@ def load_bound_3a_pi(
     Same ROW_NUMBER pattern Phase4bPredictCommand.cs uses on its
     3o parquet read.
     """
-    parquet, resolved_version = _resolve_3a_parquet_with_fallback(
+    parquet, resolved_version = _resolve_3a_parquet(
         predictions_root, station_slug, precip_3a_version, anchor)
     con = duckdb.connect(":memory:")
     df = con.execute(f"""

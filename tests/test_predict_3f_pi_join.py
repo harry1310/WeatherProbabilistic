@@ -177,6 +177,47 @@ def test_load_bound_3a_pi_falls_back_when_stamp_is_stale(tmp_path):
     assert out["ProbWet"].iloc[0] == pytest.approx(0.42)
 
 
+def test_load_bound_3a_pi_picks_latest_3a_even_when_stamp_is_on_disk(tmp_path):
+    """The resolver ALWAYS picks the latest 3a-phase champion on disk,
+    not the stamped one — the stamp is informational only after the
+    2026-05-27 redesign. So if both the stamped version AND a newer
+    3a have today's parquet, the newer wins; if 3f wanted the stamped
+    version specifically it'd be tying itself to a frozen calibration."""
+    anchor = datetime(2026, 5, 27)
+    valid_time = datetime(2026, 5, 28, 12, 0, 0)
+    older_stamp = "v2026-05-24_141845"
+    newer_3a    = "v2026-05-26_102758"
+    _write_3a_parquet(tmp_path, "ea_test_station", older_stamp, anchor,
+        [{"ValidTimeUtc": valid_time, "LeadHours": 24, "ProbWet": 0.10,
+          "PredictionMadeAtUtc": datetime(2026, 5, 27, 3, 0, 0)}])
+    _write_3a_parquet(tmp_path, "ea_test_station", newer_3a, anchor,
+        [{"ValidTimeUtc": valid_time, "LeadHours": 24, "ProbWet": 0.90,
+          "PredictionMadeAtUtc": datetime(2026, 5, 27, 9, 0, 0)}])
+
+    out, resolved = load_bound_3a_pi(tmp_path, "ea_test_station", older_stamp, anchor)
+    assert resolved == newer_3a, "latest 3a on disk must win over the stamped version"
+    assert out["ProbWet"].iloc[0] == pytest.approx(0.90), (
+        "must read from the latest 3a's parquet, not the stamped one"
+    )
+
+
+def test_load_bound_3a_pi_rejects_3a_outside_age_window(tmp_path):
+    """A 3a parquet sitting on disk from months ago shouldn't be
+    silently picked up if today's 3a pipeline is broken — that would
+    mask a real problem under stale data. The resolver enforces a
+    MAX_3A_AGE_DAYS window on the version timestamp."""
+    anchor = datetime(2026, 5, 27)
+    # Version is from 2026-01 — well outside the 30-day window.
+    too_old = "v2026-01-15_120000"
+    valid_time = datetime(2026, 5, 28, 12, 0, 0)
+    _write_3a_parquet(tmp_path, "ea_test_station", too_old, anchor,
+        [{"ValidTimeUtc": valid_time, "LeadHours": 24, "ProbWet": 0.50,
+          "PredictionMadeAtUtc": datetime(2026, 5, 27, 9, 0, 0)}])
+
+    with pytest.raises(FileNotFoundError, match="within the last .* days"):
+        load_bound_3a_pi(tmp_path, "ea_test_station", too_old, anchor)
+
+
 def test_load_bound_3a_pi_skips_phase_suffixed_siblings_in_fallback(tmp_path):
     """Unsuffixed = 3a champion; _phase3c / _phase3d / _phase3o / _phase4a /
     _phase4b carry their own siblings under the same station tree but are
