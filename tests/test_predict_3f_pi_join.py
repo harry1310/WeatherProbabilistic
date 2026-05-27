@@ -86,7 +86,8 @@ def test_load_bound_3a_pi_dedupes_duplicate_keys(tmp_path):
     ]
     _write_3a_parquet(tmp_path, "ea_test_station", "v2026-05-24_141845", anchor, rows)
 
-    out = load_bound_3a_pi(tmp_path, "ea_test_station", "v2026-05-24_141845", anchor)
+    out, resolved = load_bound_3a_pi(tmp_path, "ea_test_station", "v2026-05-24_141845", anchor)
+    assert resolved == "v2026-05-24_141845", "stamped version is on disk — no fallback expected"
 
     assert len(out) == 1, (
         f"load_bound_3a_pi must dedupe (V, L) keys before returning; "
@@ -124,7 +125,8 @@ def test_load_bound_3a_pi_preserves_distinct_keys(tmp_path):
     })
     _write_3a_parquet(tmp_path, "ea_test_station", "v2026-05-24_141845", anchor, rows)
 
-    out = load_bound_3a_pi(tmp_path, "ea_test_station", "v2026-05-24_141845", anchor)
+    out, resolved = load_bound_3a_pi(tmp_path, "ea_test_station", "v2026-05-24_141845", anchor)
+    assert resolved == "v2026-05-24_141845", "stamped version is on disk — no fallback expected"
 
     # 5 leads × 24 hours = 120 distinct keys (the +1 duplicate collapses).
     assert len(out) == 120, f"expected 120 rows after dedup, got {len(out)}"
@@ -144,3 +146,48 @@ def test_load_bound_3a_pi_raises_when_parquet_missing(tmp_path):
     anchor = datetime(2026, 5, 26)
     with pytest.raises(FileNotFoundError, match="bound Phase 3a predictions parquet missing"):
         load_bound_3a_pi(tmp_path, "ea_nonexistent_station", "v2026-05-24_141845", anchor)
+
+
+def test_load_bound_3a_pi_falls_back_when_stamp_is_stale(tmp_path):
+    """Regression for the 2026-05-27 predict-3f failure: 3f's bundle
+    stamped 3a v2026-05-24_141845 at train time but Sunday's auto-
+    retrain produced a newer v2026-05-26 3a, and only the newer
+    version has today's parquet on disk. Predict must fall back to
+    the freshest unsuffixed sibling rather than black-holing every
+    cycle until 3f next rebinds."""
+    anchor = datetime(2026, 5, 27)
+    valid_time = datetime(2026, 5, 28, 12, 0, 0)
+    rows_newer = [{
+        "ValidTimeUtc": valid_time,
+        "LeadHours": 24,
+        "ProbWet": 0.42,
+        "PredictionMadeAtUtc": datetime(2026, 5, 27, 6, 12, 0),
+    }]
+    # ONLY the newer version has today's parquet; the stamped older
+    # version has nothing at this anchor.
+    _write_3a_parquet(tmp_path, "ea_test_station", "v2026-05-26_102758", anchor, rows_newer)
+
+    out, resolved = load_bound_3a_pi(
+        tmp_path, "ea_test_station", "v2026-05-24_141845", anchor)
+
+    assert resolved == "v2026-05-26_102758", (
+        "fallback must pick the freshest unsuffixed sibling with today's parquet"
+    )
+    assert len(out) == 1
+    assert out["ProbWet"].iloc[0] == pytest.approx(0.42)
+
+
+def test_load_bound_3a_pi_skips_phase_suffixed_siblings_in_fallback(tmp_path):
+    """Unsuffixed = 3a champion; _phase3c / _phase3d / _phase3o / _phase4a /
+    _phase4b carry their own siblings under the same station tree but are
+    NOT the 3a marginal predict_3f wants. The fallback must filter them
+    out — picking a 3c parquet by accident would feed 3f the wrong π."""
+    anchor = datetime(2026, 5, 27)
+    valid_time = datetime(2026, 5, 28, 12, 0, 0)
+    # Only a _phase3c sibling has today's parquet; no plain 3a entry exists.
+    _write_3a_parquet(
+        tmp_path, "ea_test_station", "v2026-05-26_102922_phase3c", anchor,
+        [{"ValidTimeUtc": valid_time, "LeadHours": 24, "ProbWet": 0.99,
+          "PredictionMadeAtUtc": datetime(2026, 5, 27, 6, 12, 0)}])
+    with pytest.raises(FileNotFoundError, match="bound Phase 3a predictions parquet missing"):
+        load_bound_3a_pi(tmp_path, "ea_test_station", "v2026-05-24_141845", anchor)

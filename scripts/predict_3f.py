@@ -203,16 +203,86 @@ def build_live_features(anchor: datetime) -> pd.DataFrame:
 # Bound 3a join
 # ----------------------------------------------------------------------------
 
+def _resolve_3a_parquet_with_fallback(
+    predictions_root: Path,
+    station_slug: str,
+    precip_3a_version: str,
+    anchor: datetime,
+) -> tuple[Path, str]:
+    """Return (parquet path, resolved version) for today's bound 3a π.
+
+    Preferred path: the version stamped into the 3f bundle's metadata.
+    Fallback: if the stamped version's parquet is missing at today's
+    anchor, scan the station's predictions tree for any unsuffixed
+    (= 3a — 3c/3d/3o/4a/4b all carry _phaseXX) sibling that DOES have
+    today's parquet and pick the freshest by lexicographic max.
+
+    Motivated by the 2026-05-27 06:35Z predict-3f failure: 3f trained
+    at 2026-05-26 10:24 stamped 3a v2026-05-24_141845, but Sunday's
+    auto-retrain re-trained 3a at 10:27 → newer 3a writes predictions
+    to v2026-05-26_102758/date=today, leaving the stamped version's
+    folder without today's parquet. Stale-stamp shouldn't black-hole
+    every 3f cycle until the next 3f train rebinds.
+
+    Raises FileNotFoundError when neither the stamp nor any unsuffixed
+    sibling has today's parquet — predict_3f without a π source can't
+    proceed.
+    """
+    date_str = anchor.date().isoformat()
+    station_dir = predictions_root / "precipitation" / station_slug
+    preferred = (
+        station_dir / f"model_version={precip_3a_version}"
+                    / f"date={date_str}" / "predictions.parquet"
+    )
+    if preferred.is_file():
+        return preferred, precip_3a_version
+
+    # Fallback: any unsuffixed model_version=* sibling whose today/
+    # parquet exists. Order by version-name lex max so the freshest
+    # 3a champion wins. _phaseXX-suffixed dirs are 3c/3d/3o/4a/4b —
+    # not 3a, never used here.
+    candidates: list[tuple[str, Path]] = []
+    if station_dir.is_dir():
+        for d in station_dir.iterdir():
+            if not d.is_dir() or not d.name.startswith("model_version="):
+                continue
+            version = d.name[len("model_version="):]
+            if "_phase" in version:
+                continue
+            today_path = d / f"date={date_str}" / "predictions.parquet"
+            if today_path.is_file():
+                candidates.append((version, today_path))
+    if not candidates:
+        raise FileNotFoundError(
+            f"bound Phase 3a predictions parquet missing: {preferred}. "
+            f"3f cannot mix without π — neither the stamped version "
+            f"({precip_3a_version}) nor any unsuffixed sibling has today's "
+            f"parquet. Either today's predict-all step hasn't run yet for "
+            f"3a, or the predictions tree is empty for this station."
+        )
+    candidates.sort(key=lambda c: c[0])
+    chosen_version, chosen_path = candidates[-1]
+    log.warning(
+        "  bound 3a stamp %s has no parquet at %s; using on-disk fallback %s",
+        precip_3a_version, date_str, chosen_version,
+    )
+    return chosen_path, chosen_version
+
+
 def load_bound_3a_pi(
     predictions_root: Path,
     station_slug: str,
     precip_3a_version: str,
     anchor: datetime,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, str]:
     """Read TODAY's 3a champion predictions parquet for this station
-    and return (ValidTimeUtc, LeadHours, ProbWet) — the π values we
-    mix into the 3f predictive distribution. Raises if the parquet
-    is missing; predict_3f without a stage-1 source is meaningless.
+    and return ((ValidTimeUtc, LeadHours, ProbWet) DataFrame, resolved
+    3a version) — the π values we mix into the 3f predictive
+    distribution. The resolved version may differ from the stamped one
+    when the bundle's stamp went stale between 3f train and 3f predict
+    (see :func:`_resolve_3a_parquet_with_fallback`). Raises if neither
+    the stamped version nor any unsuffixed sibling has today's parquet;
+    predict_3f without a stage-1 source is meaningless.
 
     DEDUPES on (ValidTimeUtc, LeadHours) keeping the freshest
     PredictionMadeAtUtc — today's 3a parquet typically holds 4-5
@@ -223,22 +293,8 @@ def load_bound_3a_pi(
     Same ROW_NUMBER pattern Phase4bPredictCommand.cs uses on its
     3o parquet read.
     """
-    date_str = anchor.date().isoformat()
-    parquet = (
-        predictions_root
-        / "precipitation"
-        / station_slug
-        / f"model_version={precip_3a_version}"
-        / f"date={date_str}"
-        / "predictions.parquet"
-    )
-    if not parquet.is_file():
-        raise FileNotFoundError(
-            f"bound Phase 3a predictions parquet missing: {parquet}. "
-            f"3f cannot mix without π — either today's predict-all step hasn't "
-            f"run yet for 3a, or the bundle's precip_3a_version stamp "
-            f"({precip_3a_version}) is stale vs the on-disk 3a tree."
-        )
+    parquet, resolved_version = _resolve_3a_parquet_with_fallback(
+        predictions_root, station_slug, precip_3a_version, anchor)
     con = duckdb.connect(":memory:")
     df = con.execute(f"""
         WITH ranked AS (
@@ -254,7 +310,7 @@ def load_bound_3a_pi(
     """).fetch_df()
     con.close()
     df["LeadHours"] = df["LeadHours"].astype(int)
-    return df
+    return df, resolved_version
 
 
 # ----------------------------------------------------------------------------
@@ -402,10 +458,13 @@ def predict_one_station(
     per_lead_preprocess = preprocess.get("per_lead") or {}
 
     log.info("  bundle: %s", bundle_dir.name)
-    log.info("  bound 3a: %s", precip_3a_version)
+    log.info("  bound 3a (stamp): %s", precip_3a_version)
 
     log.info("  loading π from bound Phase 3a parquet...")
-    df_3a = load_bound_3a_pi(predictions_root, station_slug, precip_3a_version, anchor)
+    df_3a, resolved_3a_version = load_bound_3a_pi(
+        predictions_root, station_slug, precip_3a_version, anchor)
+    if resolved_3a_version != precip_3a_version:
+        log.info("  bound 3a (resolved): %s (stamp was stale)", resolved_3a_version)
     log.info("  π rows: %d (leads %s)",
              len(df_3a), sorted(df_3a["LeadHours"].unique().tolist()))
 
@@ -490,7 +549,10 @@ def predict_one_station(
     out = pd.concat(out_rows, ignore_index=True).sort_values(
         ["ValidTimeUtc", "LeadHours"], kind="mergesort"
     ).reset_index(drop=True)
-    out["Precip3aVersion"] = precip_3a_version
+    # Stamp the version we ACTUALLY read π from, not the bundle's
+    # (possibly stale) stamp — downstream readers expect this to point
+    # at the on-disk parquet they can re-load.
+    out["Precip3aVersion"] = resolved_3a_version
     return out
 
 
