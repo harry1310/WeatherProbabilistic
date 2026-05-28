@@ -219,6 +219,23 @@ def build_live_for_lead(location: str, lead: int, anchor: datetime,
     day_end = day_start + timedelta(days=lead // 24 + 1)
     day_start_eff = day_start + timedelta(days=(lead // 24))
 
+    # Lead semantics: "+24h tab" means "the day starting anchor+24h"
+    # (24 hourly ValidTimes), not the single ValidTime whose RunTime is
+    # exactly anchor. The WB element predict pipelines (WindPredictPipeline
+    # etc.) use this same hourly-per-day pattern — staying parallel keeps
+    # the wind page chart density consistent across phases.
+    #
+    # We previously filtered LeadHours = {lead} EXACTLY, which restricted
+    # each lead to the few ValidTimes per day where some cycle's
+    # 24h-ahead happened to align — only 7 hours/day on R2 today. Dropped
+    # that predicate; `rn=1` over RunTimeUtc DESC keeps the freshest
+    # cycle's prediction per (Model, ValidTime), which is what every WB
+    # blender already does.
+    #
+    # RunTimeSource='reported' filters out the offset_day previous_runs
+    # rows (which is what the bundle was TRAINED on but stays in-tree
+    # alongside the live rows). At predict time we want the live cycle's
+    # values per ValidTime.
     con = duckdb.connect()
     fc = con.execute(f"""
         WITH ranked AS (
@@ -229,7 +246,7 @@ def build_live_for_lead(location: str, lead: int, anchor: datetime,
                                        ORDER BY RunTimeUtc DESC) AS rn
             FROM read_parquet('{fc_glob}', union_by_name=true)
             WHERE Model IN {nwp_in}
-              AND LeadHours = {lead}
+              AND RunTimeSource = 'reported'
               AND ValidTimeUtc >= TIMESTAMP '{day_start_eff.isoformat()}'
               AND ValidTimeUtc <  TIMESTAMP '{day_end.isoformat()}'
               AND WindSpeed10m IS NOT NULL
