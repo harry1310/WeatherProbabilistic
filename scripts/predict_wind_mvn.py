@@ -330,10 +330,15 @@ def build_live_for_lead(location: str, lead: int, anchor: datetime,
 # CI helpers
 # ----------------------------------------------------------------------------
 
-def circ_quantiles_95(angles_deg: np.ndarray):
+def circ_quantiles(angles_deg: np.ndarray, level: float = 0.95):
+    """Highest-density circular credible interval at the requested level.
+
+    Finds the shortest arc covering `level` fraction of the samples per
+    column. Returns (lo_deg, hi_deg, arc_width_deg).
+    """
     M, N = angles_deg.shape
     lo = np.empty(N); hi = np.empty(N); width = np.empty(N)
-    target = int(np.ceil(0.95 * M))
+    target = int(np.ceil(level * M))
     for j in range(N):
         s = np.sort(angles_deg[:, j])
         s_ext = np.concatenate([s, s + 360.0])
@@ -343,6 +348,11 @@ def circ_quantiles_95(angles_deg: np.ndarray):
         hi[j] = s_ext[k + target - 1] % 360.0
         width[j] = widths[k]
     return lo, hi, width
+
+
+# Back-compat alias — older callers may import the 95-only name.
+def circ_quantiles_95(angles_deg: np.ndarray):
+    return circ_quantiles(angles_deg, level=0.95)
 
 
 def _mc_speed_dir(mu_u: np.ndarray, mu_v: np.ndarray,
@@ -433,9 +443,18 @@ def predict_for_location(location: str, anchor: datetime,
         alpha_spd = float(cal["alpha_prime_spd"])
         _, dir_samples = _mc_speed_dir(mu_u, mu_v, sig_u, sig_v, rho, alpha_dir)
         spd_samples, _ = _mc_speed_dir(mu_u, mu_v, sig_u, sig_v, rho, alpha_spd)
-        dir_lo, dir_hi, _ = circ_quantiles_95(dir_samples)
-        spd_lo = np.percentile(spd_samples, 2.5, axis=0)
-        spd_hi = np.percentile(spd_samples, 97.5, axis=0)
+        # 95% (2.5/97.5) and 80% (10/90) bands. Site uses Ci80 for the
+        # visible ribbon + direction wedge since the bundle's σ is wide
+        # on 30 days of Dunkeswell SYNOP training data and the 95% band
+        # was visually overwhelming. Ci95 stays in the parquet for skill
+        # diagnostics + the wind_blend mint (which reads Ci95 to feed
+        # the sigmoid composition's intervals).
+        dir_lo95, dir_hi95, _ = circ_quantiles(dir_samples, level=0.95)
+        dir_lo80, dir_hi80, _ = circ_quantiles(dir_samples, level=0.80)
+        spd_lo95 = np.percentile(spd_samples, 2.5, axis=0)
+        spd_hi95 = np.percentile(spd_samples, 97.5, axis=0)
+        spd_lo80 = np.percentile(spd_samples, 10.0, axis=0)
+        spd_hi80 = np.percentile(spd_samples, 90.0, axis=0)
 
         # Point estimates from μ (NOT MC mean — atan2 over MC samples is
         # biased; use the parameter directly).
@@ -462,11 +481,15 @@ def predict_for_location(location: str, anchor: datetime,
                 "SigmaV":                float(sig_v[i]),
                 "Rho":                   float(rho[i]),
                 "BlendDirection":        float(pt_dir[i]),
-                "BlendDirectionCi95Lo":  float(dir_lo[i]),
-                "BlendDirectionCi95Hi":  float(dir_hi[i]),
+                "BlendDirectionCi95Lo":  float(dir_lo95[i]),
+                "BlendDirectionCi95Hi":  float(dir_hi95[i]),
+                "BlendDirectionCi80Lo":  float(dir_lo80[i]),
+                "BlendDirectionCi80Hi":  float(dir_hi80[i]),
                 "BlendSpeedMagnitude":   float(pt_speed[i]),
-                "BlendSpeedCi95Lo":      float(spd_lo[i]),
-                "BlendSpeedCi95Hi":      float(spd_hi[i]),
+                "BlendSpeedCi95Lo":      float(spd_lo95[i]),
+                "BlendSpeedCi95Hi":      float(spd_hi95[i]),
+                "BlendSpeedCi80Lo":      float(spd_lo80[i]),
+                "BlendSpeedCi80Hi":      float(spd_hi80[i]),
             }
             for k, v in run_cols.items():
                 vv = v.iloc[i] if hasattr(v, "iloc") else v

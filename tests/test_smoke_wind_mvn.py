@@ -313,7 +313,9 @@ class TestPredictWindMvnSmoke:
             "ModelVersion", "LocationName",
             "MuU", "MuV", "SigmaU", "SigmaV", "Rho",
             "BlendDirection", "BlendDirectionCi95Lo", "BlendDirectionCi95Hi",
+            "BlendDirectionCi80Lo", "BlendDirectionCi80Hi",
             "BlendSpeedMagnitude", "BlendSpeedCi95Lo", "BlendSpeedCi95Hi",
+            "BlendSpeedCi80Lo", "BlendSpeedCi80Hi",
         ):
             assert col in out.columns, f"predictions parquet missing column {col}"
 
@@ -321,6 +323,16 @@ class TestPredictWindMvnSmoke:
         # axis (direction is circular so we don't check that ordering).
         assert (out["BlendSpeedCi95Lo"] <= out["BlendSpeedCi95Hi"]).all(), (
             "BlendSpeedCi95Lo > BlendSpeedCi95Hi on at least one row"
+        )
+        assert (out["BlendSpeedCi80Lo"] <= out["BlendSpeedCi80Hi"]).all(), (
+            "BlendSpeedCi80Lo > BlendSpeedCi80Hi on at least one row"
+        )
+        # CI80 must be NARROWER than CI95 — same MC samples, lower
+        # confidence level. Any row that violates means the percentile
+        # call was wired wrong.
+        assert ((out["BlendSpeedCi80Hi"] - out["BlendSpeedCi80Lo"])
+                <= (out["BlendSpeedCi95Hi"] - out["BlendSpeedCi95Lo"]) + 1e-6).all(), (
+            "BlendSpeedCi80 width should be ≤ BlendSpeedCi95 width on every row"
         )
         # Direction must wrap into [0, 360).
         assert ((out["BlendDirection"] >= 0) & (out["BlendDirection"] < 360)).all()
