@@ -33,9 +33,11 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
-# Mirrors _shared.MODELS_LEAN — the 7 NWPs train_3f trains on. Pinned
-# here (not imported) so the fixture stays usable even when _shared has
-# been monkey-patched in a test.
+# Superset of every NWP id any production Python trainer reads. train_3f
+# / train_4a filter to their own (overlapping) MODELS_LEAN lists and
+# ignore extras; train_wind_mvn pulls 6 NWPs that include `ukmo_seamless`,
+# which the 3f/4a MODELS_LEAN lists do NOT include — so we emit ukmo as
+# well to keep all three smoke harnesses able to share one forecast tree.
 MODELS_LEAN_FULL: tuple[str, ...] = (
     "gfs_seamless",
     "ecmwf_ifs025",
@@ -44,6 +46,7 @@ MODELS_LEAN_FULL: tuple[str, ...] = (
     "gem_seamless",
     "ecmwf_aifs025_single",
     "jma_seamless",
+    "ukmo_seamless",
 )
 
 DEFAULT_LEADS: tuple[int, ...] = (24, 48, 72, 96, 120)
@@ -130,6 +133,15 @@ def make_forecast_tree(
                         20.0, 100.0,
                     ))
                     dp = t - (100.0 - rh) / 5.0
+                    wsp = float(max(0.0, 8.0 + rng.normal(0, 3)))
+                    # Gust ≈ wsp × 1.4 + noise (matches the realistic ratio
+                    # range the wind_gust bake-off saw). The wind_mvn /
+                    # wind_gust smoke tests pivot WindGusts10m so without
+                    # this column the gust ratio features go all-NaN.
+                    gust = float(max(wsp, wsp * 1.4 + rng.normal(0, 0.5)))
+                    cc_low = float(np.clip(50 + 40 * (p > 0.1) + rng.normal(0, 10), 0, 100))
+                    cc_mid = float(np.clip(40 + 30 * (p > 0.1) + rng.normal(0, 10), 0, 100))
+                    cc_high = float(np.clip(30 + rng.normal(0, 15), 0, 100))
                     rows.append({
                         "LocationName": location,
                         "Model": model,
@@ -141,12 +153,17 @@ def make_forecast_tree(
                         "RelativeHumidity2m": rh,
                         "Temperature2m": float(t),
                         "DewPoint2m": float(dp),
-                        "CloudCoverLow":  float(np.clip(50 + 40 * (p > 0.1) + rng.normal(0, 10), 0, 100)),
-                        "CloudCoverMid":  float(np.clip(40 + 30 * (p > 0.1) + rng.normal(0, 10), 0, 100)),
-                        "CloudCoverHigh": float(np.clip(30 + rng.normal(0, 15), 0, 100)),
+                        "CloudCoverLow":  cc_low,
+                        "CloudCoverMid":  cc_mid,
+                        "CloudCoverHigh": cc_high,
+                        # Total CloudCover (single composite) used by the
+                        # element blenders' SPREAD features. Approximation:
+                        # max-overlap of the three layers.
+                        "CloudCover":     float(max(cc_low, cc_mid, cc_high)),
                         "Cape": float(max(0.0, rng.normal(50.0, 80.0))),
-                        "WindSpeed10m": float(max(0.0, 8.0 + rng.normal(0, 3))),
+                        "WindSpeed10m": wsp,
                         "WindDirection10m": float(rng.uniform(0, 360)),
+                        "WindGusts10m": gust,
                         "SurfacePressure": float(1013.0 + rng.normal(0, 8)),
                     })
             day_dir = model_dir / f"date={valid_day.date().isoformat()}"
@@ -327,6 +344,119 @@ def make_manifest(
         entry["ChampionPhase"] = champion_phase
     manifest_path.write_text(json.dumps(manifest, indent=2))
     return manifest_path
+
+
+# --------------------------------------------------------------------------
+# MIDAS Open Dunkeswell SYNOP truth (BADC-CSV) — wind_mvn smoke
+# --------------------------------------------------------------------------
+
+# parse_badc in train_wind_mvn.py only needs the literal "data" + "end data"
+# fences and the column header line between them. Everything before "data"
+# is preamble. We emit a single-line preamble so the fixture stays compact
+# but the file shape still matches the real MIDAS Open download pattern.
+_MIDAS_PREAMBLE = (
+    "Conventions,G,BADC-CSV,1\n"
+    "title,G,uk-hourly-weather-obs\n"
+    "observation_station,G,dunkeswell-aerodrome\n"
+    "midas_station_id,G,01383\n"
+)
+
+
+def make_dunkeswell_midas_truth(
+    root: Path,
+    years: Iterable[int] = (2022, 2023, 2024),
+    *,
+    days_per_year: int = 30,
+    rng: np.random.Generator | None = None,
+) -> Path:
+    """Write ``data/truth/midas/raw/midas-open*_01383_*_{year}.csv`` BADC-CSV
+    files matching the shape ``train_wind_mvn.parse_badc`` expects. Only
+    the four columns ``load_dunkeswell`` actually reads (ob_time,
+    met_domain_name, wind_speed (kt), wind_direction (deg)) are populated;
+    every other MIDAS column is omitted (parse_badc just splits on the
+    column header).
+
+    The signal is a low-frequency direction sweep + bounded speed walk so
+    the wind_mvn MLP can find *something* to fit, but the smoke contract
+    is "code runs end-to-end", not "model converges to skill".
+    """
+    rng = rng or np.random.default_rng(seed=2026_05_28)
+    midas_root = root / "truth" / "midas" / "raw"
+    midas_root.mkdir(parents=True, exist_ok=True)
+
+    for y in years:
+        # days_per_year × 24 hourly SYNOP obs starting at YYYY-01-01 00:00.
+        start = datetime(y, 1, 1)
+        n_hours = days_per_year * 24
+        # Slow direction sweep (one full rotation across the window) +
+        # noise. wind_speed_unit_id=4 in real MIDAS = "anemometer, knots",
+        # so we emit knots; train_wind_mvn.load_dunkeswell multiplies by
+        # KT_TO_MS.
+        base_dir = (np.linspace(0, 360, n_hours, endpoint=False)
+                    + rng.normal(0.0, 8.0, size=n_hours)) % 360.0
+        base_spd_kt = np.clip(
+            12.0 + 6.0 * np.sin(np.linspace(0, 4 * np.pi, n_hours))
+            + rng.normal(0.0, 2.0, size=n_hours),
+            0.5, 50.0,
+        )
+        lines = [_MIDAS_PREAMBLE.rstrip("\n"),
+                 "data",
+                 "ob_time,met_domain_name,wind_speed,wind_direction"]
+        for h in range(n_hours):
+            ob = start + timedelta(hours=h)
+            lines.append(
+                f"{ob.strftime('%Y-%m-%d %H:%M:%S')},SYNOP,"
+                f"{base_spd_kt[h]:.1f},{base_dir[h]:.1f}"
+            )
+        lines.append("end data")
+        # Filename pattern mirrors retrain-python.yml's rclone include
+        # filter (``midas-open*_01383_*.csv``).
+        fname = (
+            f"midas-open_uk-hourly-weather-obs_dv-smoke_devon_01383"
+            f"_dunkeswell-aerodrome_qcv-1_{y}.csv"
+        )
+        (midas_root / fname).write_text("\n".join(lines), encoding="utf-8")
+
+    return midas_root
+
+
+# --------------------------------------------------------------------------
+# Static orographic JSON — wind_mvn (and 4a synoptic-feature lookups)
+# --------------------------------------------------------------------------
+
+# train_wind_mvn.load_oro_static only reads three keys. The production JSON
+# is much bigger (climatology_by_sector_month etc.) but anything we don't
+# emit here is simply ignored downstream.
+_DEFAULT_UPWIND_GAIN_5KM = {
+    "N": -26.6, "NE": -80.2, "E": -46.1, "SE": -42.0,
+    "S": -56.0, "SW": -88.8, "W": -37.7, "NW": 50.4,
+}
+
+
+def make_orographic_static(
+    root: Path,
+    location: str,
+    *,
+    terrain_gradient_dx: float = 0.10,
+    terrain_gradient_dy: float = 0.05,
+    upwind_gain_5km: dict | None = None,
+) -> Path:
+    """Write ``data/static/orographic/{location}.json`` with just the keys
+    ``oro_dynamic`` reads (terrain_gradient_dx/dy + upwind_gain_5km).
+    Numerically modelled on Bonehill's real values so the resulting
+    ORO_LEAN features are within the same order of magnitude as
+    production."""
+    static_root = root / "static" / "orographic"
+    static_root.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "slug": location,
+        "terrain_gradient_dx": float(terrain_gradient_dx),
+        "terrain_gradient_dy": float(terrain_gradient_dy),
+        "upwind_gain_5km": dict(upwind_gain_5km or _DEFAULT_UPWIND_GAIN_5KM),
+    }
+    out = static_root / f"{location}.json"
+    out.write_text(json.dumps(payload, indent=2))
+    return out
 
 
 # --------------------------------------------------------------------------

@@ -226,7 +226,7 @@ jobs:
           done
 
           # run_<id> = requested AND admitted by this matrix location.
-          run_4a=false; run_3f=false
+          run_4a=false; run_3f=false; run_wind_mvn=false
           for row in "${PHASE_ROWS[@]}"; do
             id="${row%%|*}"
             locs="${row#*|}"
@@ -242,15 +242,17 @@ jobs:
               case "$id" in
                 4a) run_4a=true ;;
                 3f) run_3f=true ;;
+                wind_mvn) run_wind_mvn=true ;;
                 *) echo "::warning::phases.yaml impl=python phase '$id' has no Train step wired in retrain-python.yml — add run_${id} + a Train step." ;;
               esac
             fi
           done
           echo "run_4a=$run_4a" >> "$GITHUB_OUTPUT"
           echo "run_3f=$run_3f" >> "$GITHUB_OUTPUT"
-          echo "Resolved: run_4a=$run_4a run_3f=$run_3f"
+          echo "run_wind_mvn=$run_wind_mvn" >> "$GITHUB_OUTPUT"
+          echo "Resolved: run_4a=$run_4a run_3f=$run_3f run_wind_mvn=$run_wind_mvn"
 
-          if [ "$run_4a" = "false" ] && [ "$run_3f" = "false" ]; then
+          if [ "$run_4a" = "false" ] && [ "$run_3f" = "false" ] && [ "$run_wind_mvn" = "false" ]; then
             echo "::notice::No python phases run for location '$MATRIX_LOCATION' — this matrix job is a no-op (heavy install + train steps all skip)."
           fi
 
@@ -289,9 +291,10 @@ jobs:
           fi
 
       - name: Pull data trees from R2
-        # 4a and 3f both need the forecast tree + EA truth. Skipped on a
-        # no-op matrix location (no python phases resolved to run there).
-        if: steps.gate.outputs.proceed == 'true' && (steps.phases.outputs.run_4a == 'true' || steps.phases.outputs.run_3f == 'true')
+        # 4a / 3f / wind_mvn all need the forecast tree. 3f also needs EA
+        # rainfall truth; wind_mvn needs MIDAS Open Dunkeswell truth + static
+        # orography JSON. Skipped on a no-op matrix location.
+        if: steps.gate.outputs.proceed == 'true' && (steps.phases.outputs.run_4a == 'true' || steps.phases.outputs.run_3f == 'true' || steps.phases.outputs.run_wind_mvn == 'true')
         env:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
           MATRIX_LOCATION: ${{ matrix.location }}
@@ -327,6 +330,25 @@ jobs:
             rclone copyto "r2:${R2_BUCKET}/data/models/rainfall_amount/MANIFEST.json" \
               ../WeatherBlend/data/models/rainfall_amount/MANIFEST.json \
               --s3-no-check-bucket || echo "::notice::No rainfall_amount MANIFEST.json on R2 yet — train_3f will create one."
+          fi
+          # wind_mvn extras: pull MIDAS Open Dunkeswell truth (BADC-CSV)
+          # + the static orography JSON for the location. wind_direction
+          # manifest may not exist on first push; promote will create.
+          if [ "${{ steps.phases.outputs.run_wind_mvn }}" = "true" ]; then
+            mkdir -p ../WeatherBlend/data/truth/midas/raw
+            rclone copy "r2:${R2_BUCKET}/data/truth/midas/raw" \
+              ../WeatherBlend/data/truth/midas/raw \
+              --include 'midas-open*_01383_*.csv' \
+              --fast-list --transfers 4 --checkers 8 --s3-no-check-bucket \
+              || echo "::error::Dunkeswell MIDAS not on R2 — train_wind_mvn will fail."
+            mkdir -p ../WeatherBlend/data/static/orographic
+            rclone copy "r2:${R2_BUCKET}/data/static/orographic" \
+              ../WeatherBlend/data/static/orographic \
+              --include '*.json' --checkers 4 --s3-no-check-bucket
+            mkdir -p ../WeatherBlend/data/models/wind_direction
+            rclone copyto "r2:${R2_BUCKET}/data/models/wind_direction/MANIFEST.json" \
+              ../WeatherBlend/data/models/wind_direction/MANIFEST.json \
+              --s3-no-check-bucket || echo "::notice::No wind_direction MANIFEST.json on R2 yet — train_wind_mvn will create one."
           fi
 
       - name: Train 4a (BART, per-cell)
@@ -374,6 +396,25 @@ jobs:
           if [ -n "$ANCHOR" ]; then ARGS="--anchor $ANCHOR"; fi
           python -u scripts/train_3f.py $ARGS
 
+      - name: Train wind_mvn (PyTorch MLP bivariate-normal)
+        # 1 location × 3 leads = 3 MLP fits per run. Per-cell wall is
+        # ~1-3 min (300-epoch cap, early-stop typically around epoch
+        # 110-150). Total ~5-10 min. Bonehill-only initially (Membury
+        # Dunkeswell paired rows not yet validated — plan open item #4).
+        # phases.yaml's wind_direction/wind_mvn locations: ["bonehill_rocks"]
+        # filter means the Membury matrix job resolves run_wind_mvn=false
+        # and this step skips entirely for that job.
+        id: train_wind_mvn
+        if: steps.gate.outputs.proceed == 'true' && steps.phases.outputs.run_wind_mvn == 'true'
+        # continue-on-error so a wind_mvn failure doesn't strand 4a / 3f
+        # bundles (and vice versa).
+        continue-on-error: true
+        env:
+          WEATHERBLEND_DATA_ROOT: ${{ github.workspace }}/../WeatherBlend/data
+          WB_LOCATION: ${{ matrix.location }}
+        run: |
+          python -u scripts/train_wind_mvn.py --location ${{ matrix.location }}
+
       # ----- R2 auto-push ------------------------------------------------
       # R2 sync is incremental, gated on each train step's success (the
       # guard exited 4 if data drifted, in which case write_bundle never
@@ -410,16 +451,32 @@ jobs:
             --fast-list --transfers 16 --checkers 32 --s3-no-check-bucket \
             --include "**/*phase3f*/**"
 
+      - name: Push wind_mvn bundles to R2
+        # train_wind_mvn.py writes per-lead torch state dicts + scaler +
+        # calibration + metadata under
+        # ../WeatherBlend/data/models/wind_direction/{location}/v..._wind_mvn/.
+        # First push to wind_direction/ needs --s3-no-check-bucket (fresh
+        # prefix, same IAM gotcha).
+        if: steps.phases.outputs.run_wind_mvn == 'true' && steps.train_wind_mvn.outcome == 'success'
+        env:
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          rclone copy ../WeatherBlend/data/models/wind_direction \
+            "r2:${R2_BUCKET}/data/models/wind_direction" \
+            --fast-list --transfers 16 --checkers 32 --s3-no-check-bucket \
+            --include "**/*wind_mvn*/**"
+
       - name: Push MANIFEST.json to R2
-        # train_4a.py + train_3f.py both promote the freshly-trained
-        # version into the local MANIFEST.json's Active list (added
-        # 2026-05-12 — see manifest_promote.py module docstring for why;
-        # root-cause was "no 4a on site since midday May 10" symptom). The
-        # bundle-push steps above use --include filters scoped to phase
-        # subtrees, so MANIFEST.json (at each target's root) wouldn't be
-        # picked up by either. This step does the explicit manifest push
-        # for each target tree any phase promoted into.
-        if: (steps.phases.outputs.run_4a == 'true' && steps.train_4a.outcome == 'success') || (steps.phases.outputs.run_3f == 'true' && steps.train_3f.outcome == 'success')
+        # train_4a.py + train_3f.py + train_wind_mvn.py all promote the
+        # freshly-trained version into the local MANIFEST.json's Active
+        # list (added 2026-05-12 — see manifest_promote.py module
+        # docstring for why; root-cause was "no 4a on site since midday
+        # May 10" symptom). The bundle-push steps above use --include
+        # filters scoped to phase subtrees, so MANIFEST.json (at each
+        # target's root) wouldn't be picked up by either. This step does
+        # the explicit manifest push for each target tree any phase
+        # promoted into.
+        if: (steps.phases.outputs.run_4a == 'true' && steps.train_4a.outcome == 'success') || (steps.phases.outputs.run_3f == 'true' && steps.train_3f.outcome == 'success') || (steps.phases.outputs.run_wind_mvn == 'true' && steps.train_wind_mvn.outcome == 'success')
         env:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
@@ -437,6 +494,12 @@ jobs:
               --s3-no-check-bucket
             echo "Pushed rainfall_amount/MANIFEST.json to R2."
           fi
+          if [ -f ../WeatherBlend/data/models/wind_direction/MANIFEST.json ]; then
+            rclone copyto ../WeatherBlend/data/models/wind_direction/MANIFEST.json \
+              "r2:${R2_BUCKET}/data/models/wind_direction/MANIFEST.json" \
+              --s3-no-check-bucket
+            echo "Pushed wind_direction/MANIFEST.json to R2."
+          fi
 
       - name: Aggregate retrain results
         # The train steps are continue-on-error so the push steps can
@@ -448,6 +511,7 @@ jobs:
           failed=()
           if [ "${{ steps.train_4a.outcome }}" = "failure" ]; then failed+=("4a"); fi
           if [ "${{ steps.train_3f.outcome }}" = "failure" ]; then failed+=("3f"); fi
+          if [ "${{ steps.train_wind_mvn.outcome }}" = "failure" ]; then failed+=("wind_mvn"); fi
           if [ ${#failed[@]} -gt 0 ]; then
             echo "::error::Retrain failed for phase(s): ${failed[*]}. Passing phases were still pushed to R2 — inspect each failed phase's log above."
             exit 1

@@ -48,6 +48,12 @@ pyyaml>=6.0
 # mode on the R side. A pin keeps 3f predict bit-identical to 3f train
 # whenever a fresh CI runner provisions deps.
 ngboost==0.5.10
+# PyTorch (CPU) — wind_mvn (Phase 2 wind blender plan). MLP
+# bivariate-normal direction estimator (29→64→64→{2,2,1}, ~6k params).
+# Trains + predicts in seconds on CPU; no GPU dep needed. Floor at 2.10
+# matches local dev (verified 2.12.0+cpu) and CI's default torch wheel
+# resolution under Linux without NVIDIA indices.
+torch>=2.10,<3.0
 # Bake-off-only deps (lightgbm, pymc-bart) live in requirements-bakeoff.txt
 # so production CI doesn't install them. predict_4a imports its shared
 # helpers from scripts/_shared.py rather than transitively pulling in the
