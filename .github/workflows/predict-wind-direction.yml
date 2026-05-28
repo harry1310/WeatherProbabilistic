@@ -156,13 +156,28 @@ jobs:
       - name: Push predictions to R2
         # wind_direction is a fresh prefix on first push — --s3-no-check-bucket
         # avoids the IAM-token CreateBucket gotcha.
+        #
+        # Soft-skip guard: when no wind_mvn bundle is on R2 yet (pre-first-
+        # Sunday-retrain), `Run wind_mvn predict` exits non-zero and
+        # continue-on-error masks it — but `continue-on-error` doesn't skip
+        # SUBSEQUENT steps, so without this guard rclone tries to copy a
+        # directory predict never created and the workflow fails with
+        # "directory not found" (2026-05-28 incident). The directory check
+        # below silent-skips the push when there's nothing to upload,
+        # which matches the workflow's intended "soft-skip until first
+        # bundle exists" semantics end-to-end.
         env:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
-          rclone copy ../WeatherBlend/data/predictions/wind_direction \
-            "r2:${R2_BUCKET}/data/predictions/wind_direction" \
-            --include '**/model_version=*wind_mvn*/**' \
-            --fast-list --transfers 16 --checkers 32 --progress --s3-no-check-bucket
+          PRED_ROOT=../WeatherBlend/data/predictions/wind_direction
+          if [ -d "$PRED_ROOT" ] && [ -n "$(find "$PRED_ROOT" -name '*.parquet' -print -quit 2>/dev/null)" ]; then
+            rclone copy "$PRED_ROOT" \
+              "r2:${R2_BUCKET}/data/predictions/wind_direction" \
+              --include '**/model_version=*wind_mvn*/**' \
+              --fast-list --transfers 16 --checkers 32 --progress --s3-no-check-bucket
+          else
+            echo "::notice::No wind_direction predictions produced this cycle (likely no *_wind_mvn bundle on R2 yet) — skipping R2 push."
+          fi
 
       - name: Upload logs as artifact
         if: failure()
