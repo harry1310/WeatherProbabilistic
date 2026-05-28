@@ -37,6 +37,7 @@ sys.path.insert(0, str(REPO_ROOT / "tests"))
 from _smoke_fixtures import (  # noqa: E402
     make_forecast_tree,
     make_rainfall_truth,
+    run_sync_train_data,
 )
 
 
@@ -80,13 +81,25 @@ def smoke_root(tmp_path, monkeypatch):
 @pytest.fixture
 def trained_bundle(smoke_root):
     """Write the synthetic forecast + truth tree AND run train_4a.main()
-    end-to-end. Returns the bundle directory."""
+    end-to-end. Returns the bundle directory.
+
+    Train-side fixtures land in a fake-R2 dir; ``run_sync_train_data``
+    invokes the production sync script (the SAME script
+    ``retrain-python.yml`` calls) to copy them into the data root
+    train_4a will read. A missing pull declaration for 4a then fails
+    here rather than in a Sunday retrain."""
+    fake_r2 = smoke_root / "fake-r2"
+    fake_r2_data = fake_r2 / "data"
     make_forecast_tree(
-        smoke_root, LOCATION, TRAIN_START, n_days=TRAIN_DAYS,
+        fake_r2_data, LOCATION, TRAIN_START, n_days=TRAIN_DAYS,
         run_time_source="offset_day",
     )
     make_rainfall_truth(
-        smoke_root, LOCATION, STATION_FRIENDLY, TRAIN_START, n_days=TRAIN_DAYS,
+        fake_r2_data, LOCATION, STATION_FRIENDLY, TRAIN_START, n_days=TRAIN_DAYS,
+    )
+    run_sync_train_data(
+        location=LOCATION, phases="4a",
+        r2_source=fake_r2, local_root=smoke_root,
     )
 
     import train_4a

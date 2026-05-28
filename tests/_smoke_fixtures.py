@@ -26,6 +26,10 @@ returns the path it wrote so the caller can assert.
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
@@ -457,6 +461,96 @@ def make_orographic_static(
     out = static_root / f"{location}.json"
     out.write_text(json.dumps(payload, indent=2))
     return out
+
+
+# --------------------------------------------------------------------------
+# sync_train_data.sh invocation
+# --------------------------------------------------------------------------
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SYNC_SCRIPT = REPO_ROOT / "scripts" / "sync_train_data.sh"
+
+
+def _locate_bash() -> str:
+    """Locate a bash executable.
+
+    On ubuntu-latest a bare ``"bash"`` resolves via PATH; on Windows the
+    Python interpreter's PATH typically exposes Git's ``cmd/`` directory
+    (which has ``git.exe``) but NOT ``bin/`` or ``usr/bin/`` (where Git
+    Bash itself lives), so ``subprocess.run(["bash", …])`` fails with
+    FileNotFoundError. Prefer a known absolute path on Windows; fall
+    back to PATH search on every platform. Honour ``WB_BASH`` as an
+    explicit override for non-standard Git installs.
+    """
+    override = os.environ.get("WB_BASH")
+    if override and os.path.isfile(override):
+        return override
+    if sys.platform == "win32":
+        for candidate in (
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files\Git\usr\bin\bash.exe",
+            r"C:\Program Files (x86)\Git\bin\bash.exe",
+        ):
+            if os.path.isfile(candidate):
+                return candidate
+    found = shutil.which("bash")
+    if found:
+        return found
+    raise RuntimeError(
+        "Could not locate a bash executable. Install Git for Windows "
+        "(provides Git Bash) or set WB_BASH to an explicit bash.exe path."
+    )
+
+
+def run_sync_train_data(
+    *,
+    location: str,
+    phases: str,
+    r2_source: Path,
+    local_root: Path,
+) -> None:
+    """Invoke ``scripts/sync_train_data.sh`` against a local fake-R2 dir.
+
+    Mirrors the production "Pull data trees from R2" step in
+    ``retrain-python.yml`` exactly — same script, same arg shape — so a
+    missing pull declaration fails the smoke at PR time rather than
+    "Loaded 0 rows" in a Sunday retrain.
+
+    Required layout in ``r2_source``: fixtures written to
+    ``r2_source/data/forecasts/…``, ``r2_source/data/truth/…`` etc. (the
+    sync script's source prefix includes ``data/``; the destination root
+    does not, mirroring R2 vs the on-runner ``../WeatherBlend/data``
+    layout).
+
+    Raises ``RuntimeError`` if the script is missing or rclone/bash are
+    not on PATH — surface as a clear test failure instead of a silent
+    skip.
+    """
+    if not SYNC_SCRIPT.exists():
+        raise RuntimeError(
+            f"sync_train_data.sh not found at {SYNC_SCRIPT}; smoke harness "
+            f"cannot validate pull declarations. Run from a WP checkout."
+        )
+    env = os.environ.copy()
+    env["R2_SOURCE"] = str(r2_source)
+    env["LOCAL_ROOT"] = str(local_root)
+    bash_exe = _locate_bash()
+    result = subprocess.run(
+        [bash_exe, str(SYNC_SCRIPT), location, phases],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "sync_train_data.sh failed:\n"
+            f"  cmd: bash {SYNC_SCRIPT} {location} {phases}\n"
+            f"  R2_SOURCE={r2_source}\n"
+            f"  LOCAL_ROOT={local_root}\n"
+            f"  exit={result.returncode}\n"
+            f"  stdout:\n{result.stdout}\n"
+            f"  stderr:\n{result.stderr}"
+        )
 
 
 # --------------------------------------------------------------------------

@@ -32,6 +32,7 @@ from _smoke_fixtures import (  # noqa: E402
     make_forecast_tree,
     make_manifest,
     make_rainfall_truth,
+    run_sync_train_data,
 )
 
 
@@ -68,14 +69,25 @@ def trained_bundle(smoke_root):
     """Fixture that writes the synthetic forecast + truth tree AND runs
     train_3f end-to-end. Returns the bundle directory path. Reused by
     both the train assertions and the predict test (so we don't pay the
-    24s NGBoost cost twice)."""
-    # Train-side fixture: 30 days of offset_day forecasts + matching truth.
+    24s NGBoost cost twice).
+
+    Train-side fixtures land in a fake-R2 dir; ``run_sync_train_data``
+    invokes the production sync script (the SAME script
+    ``retrain-python.yml`` calls) to copy them into the data root
+    train_3f will read. A missing pull declaration for 3f then fails
+    here rather than in a Sunday retrain."""
+    fake_r2 = smoke_root / "fake-r2"
+    fake_r2_data = fake_r2 / "data"
     make_forecast_tree(
-        smoke_root, LOCATION, TRAIN_START, n_days=TRAIN_DAYS,
+        fake_r2_data, LOCATION, TRAIN_START, n_days=TRAIN_DAYS,
         run_time_source="offset_day",
     )
     make_rainfall_truth(
-        smoke_root, LOCATION, STATION_FRIENDLY, TRAIN_START, n_days=TRAIN_DAYS,
+        fake_r2_data, LOCATION, STATION_FRIENDLY, TRAIN_START, n_days=TRAIN_DAYS,
+    )
+    run_sync_train_data(
+        location=LOCATION, phases="3f",
+        r2_source=fake_r2, local_root=smoke_root,
     )
 
     # Invoke train_3f in-process so monkeypatched env is preserved (a
@@ -163,12 +175,18 @@ class TestTrain3fSmoke:
         """
         # Write the fixture but skip train_3f.main()'s sys.exit path —
         # call train_one_station directly so we can introspect its return.
+        fake_r2 = smoke_root / "fake-r2"
+        fake_r2_data = fake_r2 / "data"
         make_forecast_tree(
-            smoke_root, LOCATION, TRAIN_START, n_days=TRAIN_DAYS,
+            fake_r2_data, LOCATION, TRAIN_START, n_days=TRAIN_DAYS,
             run_time_source="offset_day",
         )
         make_rainfall_truth(
-            smoke_root, LOCATION, STATION_FRIENDLY, TRAIN_START, n_days=TRAIN_DAYS,
+            fake_r2_data, LOCATION, STATION_FRIENDLY, TRAIN_START, n_days=TRAIN_DAYS,
+        )
+        run_sync_train_data(
+            location=LOCATION, phases="3f",
+            r2_source=fake_r2, local_root=smoke_root,
         )
         import train_3f
         importlib.reload(train_3f)

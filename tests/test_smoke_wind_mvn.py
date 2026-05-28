@@ -38,6 +38,7 @@ from _smoke_fixtures import (  # noqa: E402
     make_dunkeswell_midas_truth,
     make_forecast_tree,
     make_orographic_static,
+    run_sync_train_data,
 )
 
 
@@ -81,17 +82,29 @@ def trained_bundle(smoke_root):
     """Write the synthetic forecast + Dunkeswell SYNOP + orography fixtures
     AND run train_wind_mvn.main() end-to-end. Returns the bundle directory.
     Per-test isolation: each test gets its own tmp_path, so the predict
-    test reads from this fixture's output, not a sibling test's."""
+    test reads from this fixture's output, not a sibling test's.
+
+    Train-side fixtures land in a fake-R2 dir; ``run_sync_train_data``
+    invokes the production sync script (the SAME script
+    ``retrain-python.yml`` calls) to copy them into the data root
+    train_wind_mvn will read. A missing pull declaration for wind_mvn
+    then fails here rather than in a Sunday retrain."""
+    fake_r2 = smoke_root / "fake-r2"
+    fake_r2_data = fake_r2 / "data"
     make_forecast_tree(
-        smoke_root, LOCATION, TRAIN_START, n_days=TRAIN_DAYS,
+        fake_r2_data, LOCATION, TRAIN_START, n_days=TRAIN_DAYS,
         run_time_source="offset_day",
     )
     # Dunkeswell SYNOP fixture spans Jan-Feb of the same year as the
     # forecast window so the inner join lands non-empty per lead.
     make_dunkeswell_midas_truth(
-        smoke_root, years=(TRAIN_START.year,), days_per_year=TRAIN_DAYS + 10,
+        fake_r2_data, years=(TRAIN_START.year,), days_per_year=TRAIN_DAYS + 10,
     )
-    make_orographic_static(smoke_root, LOCATION)
+    make_orographic_static(fake_r2_data, LOCATION)
+    run_sync_train_data(
+        location=LOCATION, phases="wind_mvn",
+        r2_source=fake_r2, local_root=smoke_root,
+    )
 
     import train_wind_mvn
     importlib.reload(train_wind_mvn)

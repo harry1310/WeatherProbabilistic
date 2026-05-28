@@ -252,12 +252,30 @@ jobs:
           echo "run_wind_mvn=$run_wind_mvn" >> "$GITHUB_OUTPUT"
           echo "Resolved: run_4a=$run_4a run_3f=$run_3f run_wind_mvn=$run_wind_mvn"
 
+          # CSV of resolved phases — consumed by scripts/sync_train_data.sh
+          # so the per-phase pull declarations are the same source of truth
+          # the smoke tests use. Empty = no pulls + train steps all skip.
+          RESOLVED_CSV=""
+          [ "$run_4a"       = "true" ] && RESOLVED_CSV="${RESOLVED_CSV:+$RESOLVED_CSV,}4a"
+          [ "$run_3f"       = "true" ] && RESOLVED_CSV="${RESOLVED_CSV:+$RESOLVED_CSV,}3f"
+          [ "$run_wind_mvn" = "true" ] && RESOLVED_CSV="${RESOLVED_CSV:+$RESOLVED_CSV,}wind_mvn"
+          echo "phases_resolved_csv=$RESOLVED_CSV" >> "$GITHUB_OUTPUT"
+          echo "phases_resolved_csv='$RESOLVED_CSV'"
+
           if [ "$run_4a" = "false" ] && [ "$run_3f" = "false" ] && [ "$run_wind_mvn" = "false" ]; then
             echo "::notice::No python phases run for location '$MATRIX_LOCATION' — this matrix job is a no-op (heavy install + train steps all skip)."
           fi
 
       - uses: actions/setup-python@v5
-        if: steps.gate.outputs.proceed == 'true'
+        # Short-circuit when no phases resolve for this matrix location
+        # (e.g. manual dispatch of --phases 4a on the membury job, or a
+        # future location added to the matrix that no phase yet admits).
+        # setup-python is ~5–10 s but the Install Python deps step below
+        # is ~30 s and ~1 GB of wheels — both wasted on a no-op matrix
+        # job. The Fetch phases.yaml step already runs (it uses
+        # pre-installed yq/bash), and the gate step has already emitted
+        # the "::notice::No python phases run …" line.
+        if: steps.gate.outputs.proceed == 'true' && steps.phases.outputs.phases_resolved_csv != ''
         with:
           python-version: "3.12"
 
@@ -278,7 +296,7 @@ jobs:
           R -e 'library(dbarts); cat("dbarts version:", as.character(packageVersion("dbarts")), "\n")'
 
       - name: Install Python deps
-        if: steps.gate.outputs.proceed == 'true'
+        if: steps.gate.outputs.proceed == 'true' && steps.phases.outputs.phases_resolved_csv != ''
         env:
           RPY2_CFFI_MODE: ABI
         run: |
@@ -291,65 +309,16 @@ jobs:
           fi
 
       - name: Pull data trees from R2
-        # 4a / 3f / wind_mvn all need the forecast tree. 3f also needs EA
-        # rainfall truth; wind_mvn needs MIDAS Open Dunkeswell truth + static
-        # orography JSON. Skipped on a no-op matrix location.
-        if: steps.gate.outputs.proceed == 'true' && (steps.phases.outputs.run_4a == 'true' || steps.phases.outputs.run_3f == 'true' || steps.phases.outputs.run_wind_mvn == 'true')
+        # Per-phase pull declarations live in scripts/sync_train_data.sh —
+        # the SAME script the smoke tests invoke against a local fake-R2
+        # dir. Adding a new pull for a phase = one edit there; smoke +
+        # production stay in lockstep. Skipped on a no-op matrix location.
+        if: steps.gate.outputs.proceed == 'true' && steps.phases.outputs.phases_resolved_csv != ''
         env:
-          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_SOURCE: "r2:${{ secrets.R2_BUCKET }}"
           MATRIX_LOCATION: ${{ matrix.location }}
-        run: |
-          mkdir -p "../WeatherBlend/data/forecasts/location=$MATRIX_LOCATION"
-          for m in gfs_seamless ecmwf_ifs025 icon_seamless meteofrance_seamless gem_seamless ecmwf_aifs025_single jma_seamless; do
-            rclone copy "r2:${R2_BUCKET}/data/forecasts/location=$MATRIX_LOCATION/model=$m" \
-              "../WeatherBlend/data/forecasts/location=$MATRIX_LOCATION/model=$m" \
-              --fast-list --transfers 16 --checkers 32
-          done
-          mkdir -p ../WeatherBlend/data/truth/rainfall
-          rclone copy "r2:${R2_BUCKET}/data/truth/rainfall" \
-            ../WeatherBlend/data/truth/rainfall \
-            --fast-list --transfers 16 --checkers 32
-          # Pull precipitation MANIFEST.json so train_4a can promote the
-          # new versions into the EXISTING Active list rather than
-          # starting from a blank manifest. Without this, the promote
-          # helper would mint a fresh manifest with only the freshly
-          # trained version's station entries — clobbering the .NET
-          # phases' Bonehill entries on the next push. Critical.
-          # train_3f also reads this manifest to resolve the bound 3a
-          # champion version it stamps into its own bundle metadata.
-          mkdir -p ../WeatherBlend/data/models/precipitation
-          rclone copyto "r2:${R2_BUCKET}/data/models/precipitation/MANIFEST.json" \
-            ../WeatherBlend/data/models/precipitation/MANIFEST.json \
-            --s3-no-check-bucket || echo "::warning::No precipitation MANIFEST.json on R2 yet — train_3f will warn + stamp empty precip_3a_version."
-          # Pull the rainfall_amount manifest too (for the 3f promote step).
-          # Same idempotency reason as above — promote merges into existing
-          # entries rather than starting blank. First run on a fresh tree
-          # the manifest may not exist yet; promote will create it.
-          if [ "${{ steps.phases.outputs.run_3f }}" = "true" ]; then
-            mkdir -p ../WeatherBlend/data/models/rainfall_amount
-            rclone copyto "r2:${R2_BUCKET}/data/models/rainfall_amount/MANIFEST.json" \
-              ../WeatherBlend/data/models/rainfall_amount/MANIFEST.json \
-              --s3-no-check-bucket || echo "::notice::No rainfall_amount MANIFEST.json on R2 yet — train_3f will create one."
-          fi
-          # wind_mvn extras: pull MIDAS Open Dunkeswell truth (BADC-CSV)
-          # + the static orography JSON for the location. wind_direction
-          # manifest may not exist on first push; promote will create.
-          if [ "${{ steps.phases.outputs.run_wind_mvn }}" = "true" ]; then
-            mkdir -p ../WeatherBlend/data/truth/midas/raw
-            rclone copy "r2:${R2_BUCKET}/data/truth/midas/raw" \
-              ../WeatherBlend/data/truth/midas/raw \
-              --include 'midas-open*_01383_*.csv' \
-              --fast-list --transfers 4 --checkers 8 --s3-no-check-bucket \
-              || echo "::error::Dunkeswell MIDAS not on R2 — train_wind_mvn will fail."
-            mkdir -p ../WeatherBlend/data/static/orographic
-            rclone copy "r2:${R2_BUCKET}/data/static/orographic" \
-              ../WeatherBlend/data/static/orographic \
-              --include '*.json' --checkers 4 --s3-no-check-bucket
-            mkdir -p ../WeatherBlend/data/models/wind_direction
-            rclone copyto "r2:${R2_BUCKET}/data/models/wind_direction/MANIFEST.json" \
-              ../WeatherBlend/data/models/wind_direction/MANIFEST.json \
-              --s3-no-check-bucket || echo "::notice::No wind_direction MANIFEST.json on R2 yet — train_wind_mvn will create one."
-          fi
+          RESOLVED_PHASES: ${{ steps.phases.outputs.phases_resolved_csv }}
+        run: bash scripts/sync_train_data.sh "$MATRIX_LOCATION" "$RESOLVED_PHASES"
 
       - name: Train 4a (BART, per-cell)
         # 3 stations × 5 leads = 15 BART fits per run, ~5-8 min each

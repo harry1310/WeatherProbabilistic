@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+#
+# WeatherProbabilistic/scripts/sync_train_data.sh
+#
+# Sibling of WeatherBlend's scripts/sync_train_data.sh — same contract,
+# scoped to the python (impl=python) train phases this repo owns:
+#   - 4a       per-cell BART precipitation
+#   - 3f       NGBoost-LogNormal rainfall amount
+#   - wind_mvn PyTorch bivariate-normal wind direction
+#
+# Single source of truth for "which data trees does each python phase
+# consume?". Called by:
+#   - .github/workflows/retrain-python.yml (Sunday + ad-hoc retrains)
+#   - tests/test_smoke_*.py (via subprocess against a local fake-R2 dir)
+#
+# Adding a new python phase = update phases.yaml AND the case table
+# below. Both the workflow + smoke pick up the new pull declaration
+# automatically. Missing a declaration here = smoke fails at PR time
+# rather than "Loaded 0 rows" in a Sunday retrain.
+#
+# Usage:
+#   sync_train_data.sh <location> <phases-csv>
+#
+# Required env:
+#   R2_SOURCE   "r2:<bucket>" in production, or a local fake-R2 path in smoke.
+# Optional env:
+#   LOCAL_ROOT  Destination root (default: ../WeatherBlend/data — the
+#               production layout where this repo runs alongside the WB
+#               checkout on the runner).
+#
+# Exit codes:
+#   0  success
+#   2  bad args
+#   3  unknown phase id
+#   *  rclone exit code
+set -euo pipefail
+
+if [ "$#" -ne 2 ]; then
+  echo "usage: $0 <location> <phases-csv>"
+  echo "  e.g. $0 bonehill_rocks 4a,3f,wind_mvn"
+  exit 2
+fi
+
+location="$1"
+phases_csv="$2"
+: "${R2_SOURCE:?R2_SOURCE env var required (e.g. r2:weatherblend or /tmp/fake-r2)}"
+LOCAL_ROOT="${LOCAL_ROOT:-../WeatherBlend/data}"
+
+mkdir -p "$LOCAL_ROOT"
+cd "$LOCAL_ROOT"
+
+# ----------------------------------------------------------------------------
+# PER-PHASE NEEDS TABLE
+# ----------------------------------------------------------------------------
+# Each python phase declares which trees it consumes. Same shape as the
+# WB script — keeps the two repos' pull contracts in lockstep when a
+# phase grows a new dependency.
+#
+# WP's forecast pull is FILTERED to the seven Open-Meteo seamless models
+# (the python trainers only consume those; the raw S3 archive models
+# are blender inputs only). The filter list is hard-coded inside the
+# pull below — see PYTHON_NWP_MODELS.
+
+need_forecasts=0
+need_rainfall=0
+need_midas=0
+need_orographic=0
+need_precip_manifest=0
+need_rainfall_amount_manifest=0
+need_wind_direction_manifest=0
+
+IFS=',' read -ra phases <<< "$phases_csv"
+for p in "${phases[@]}"; do
+  case "$p" in
+    # Per-cell BART precipitation. Needs forecast tree + rainfall truth.
+    # Precipitation MANIFEST is critical — train_4a promotes new versions
+    # into the EXISTING Active list (preserving WB-side .NET phase
+    # entries). Without the MANIFEST pull, promote starts blank and
+    # clobbers Bonehill on the next push.
+    4a)
+      need_forecasts=1; need_rainfall=1; need_precip_manifest=1 ;;
+
+    # NGBoost-LogNormal rainfall amount. Same data as 4a + a separate
+    # rainfall_amount MANIFEST (its own target tree).
+    3f)
+      need_forecasts=1; need_rainfall=1
+      need_precip_manifest=1            # train_3f reads bound 3a champion version
+      need_rainfall_amount_manifest=1 ;;
+
+    # Phase 2 wind_mvn (PyTorch MLP MVN). Forecasts + Dunkeswell MIDAS
+    # truth + static orographic JSON + wind_direction MANIFEST.
+    wind_mvn)
+      need_forecasts=1; need_midas=1; need_orographic=1
+      need_wind_direction_manifest=1 ;;
+
+    *)
+      echo "::error::sync_train_data: unknown python phase '$p' — add it to scripts/sync_train_data.sh."
+      exit 3 ;;
+  esac
+done
+
+# ----------------------------------------------------------------------------
+# Pulls — WP-specific shapes
+# ----------------------------------------------------------------------------
+# Union of every Open-Meteo seamless model any python trainer consumes.
+# Per-trainer NWPS lists (each trainer filters down to its own subset):
+#   - train_4a.py  / train_3f.py:    7 — incl mf + aifs, NO ukmo
+#   - train_wind_mvn.py:             6 — incl ukmo, NO mf, NO aifs
+# Sync pulls the UNION (8) so every trainer finds its inputs. Each
+# trainer's own NWPS filter narrows further at feature-build time, so
+# over-pulling is cheap and load-bearing — under-pulling silently drops
+# columns from the pivot. The legacy inline list in retrain-python.yml
+# (replaced by this script 2026-05-28) omitted ukmo_seamless, which
+# would have silently shrunk wind_mvn from 6→5 NWPs in production.
+PYTHON_NWP_MODELS=(
+  gfs_seamless ecmwf_ifs025 icon_seamless meteofrance_seamless
+  gem_seamless ecmwf_aifs025_single jma_seamless ukmo_seamless
+)
+
+# Forecast tree: per-NWP filter (matches the legacy inline loop). Each
+# rclone copy is its own tree pull so the include/exclude semantics
+# stay simple.
+if [ "$need_forecasts" -gt 0 ]; then
+  for m in "${PYTHON_NWP_MODELS[@]}"; do
+    echo "::group::sync_train_data: pull forecasts/location=$location/model=$m"
+    mkdir -p "forecasts/location=$location/model=$m"
+    rclone copy "${R2_SOURCE%/}/data/forecasts/location=$location/model=$m" \
+      "forecasts/location=$location/model=$m" \
+      --fast-list --transfers 16 --checkers 32 --s3-no-check-bucket \
+      || echo "::warning::no rows for model=$m at location=$location (may be expected on first runs)"
+    echo "::endgroup::"
+  done
+fi
+
+if [ "$need_rainfall" -gt 0 ]; then
+  echo "::group::sync_train_data: pull truth/rainfall"
+  mkdir -p truth/rainfall
+  rclone copy "${R2_SOURCE%/}/data/truth/rainfall" truth/rainfall \
+    --fast-list --transfers 16 --checkers 32 --s3-no-check-bucket
+  echo "::endgroup::"
+fi
+
+if [ "$need_midas" -gt 0 ]; then
+  echo "::group::sync_train_data: pull truth/midas/raw"
+  mkdir -p truth/midas/raw
+  rclone copy "${R2_SOURCE%/}/data/truth/midas/raw" truth/midas/raw \
+    --include 'midas-open*_01383_*.csv' \
+    --fast-list --transfers 4 --checkers 8 --s3-no-check-bucket
+  echo "::endgroup::"
+fi
+
+if [ "$need_orographic" -gt 0 ]; then
+  echo "::group::sync_train_data: pull static/orographic"
+  mkdir -p static/orographic
+  rclone copy "${R2_SOURCE%/}/data/static/orographic" static/orographic \
+    --include '*.json' --checkers 4 --s3-no-check-bucket
+  echo "::endgroup::"
+fi
+
+# Manifests are single-file copytos. Soft on missing source — first
+# Sunday for a fresh target the manifest may not exist yet; promote
+# helpers create it.
+copyto_manifest() {
+  local target="$1"
+  echo "::group::sync_train_data: pull models/$target/MANIFEST.json"
+  mkdir -p "models/$target"
+  rclone copyto "${R2_SOURCE%/}/data/models/$target/MANIFEST.json" \
+    "models/$target/MANIFEST.json" --s3-no-check-bucket \
+    || echo "::notice::No $target MANIFEST.json on R2 yet — train_$target will create one."
+  echo "::endgroup::"
+}
+
+if [ "$need_precip_manifest" -gt 0 ]; then
+  copyto_manifest "precipitation"
+fi
+if [ "$need_rainfall_amount_manifest" -gt 0 ]; then
+  copyto_manifest "rainfall_amount"
+fi
+if [ "$need_wind_direction_manifest" -gt 0 ]; then
+  copyto_manifest "wind_direction"
+fi
+
+echo "sync_train_data: done."
+echo "  forecasts=$need_forecasts rainfall=$need_rainfall midas=$need_midas orographic=$need_orographic"
+echo "  manifests: precip=$need_precip_manifest rainfall_amount=$need_rainfall_amount_manifest wind_direction=$need_wind_direction_manifest"
