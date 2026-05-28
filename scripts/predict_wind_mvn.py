@@ -437,28 +437,53 @@ def predict_for_location(location: str, anchor: datetime,
         sig_v = sig_t[:, 1].numpy()
         rho = rho_t.squeeze(-1).numpy()
 
-        # Calibrated MC samples: direction first (α'_dir), then speed (α'_spd).
         cal = calibration["per_lead"][lead_key]
         alpha_dir = float(cal["alpha_prime_dir"])
         alpha_spd = float(cal["alpha_prime_spd"])
+
+        # Direction CI: MC over (u,v), highest-density arc per level.
+        # The direction marginal of N(μ, Σ) has no closed-form CI, so MC
+        # is the practical option. For directional uncertainty the MC is
+        # well-behaved (no Jensen bias) — the issue is purely on speed.
         _, dir_samples = _mc_speed_dir(mu_u, mu_v, sig_u, sig_v, rho, alpha_dir)
-        spd_samples, _ = _mc_speed_dir(mu_u, mu_v, sig_u, sig_v, rho, alpha_spd)
-        # 95% (2.5/97.5) and 80% (10/90) bands. Site uses Ci80 for the
-        # visible ribbon + direction wedge since the bundle's σ is wide
-        # on 30 days of Dunkeswell SYNOP training data and the 95% band
-        # was visually overwhelming. Ci95 stays in the parquet for skill
-        # diagnostics + the wind_blend mint (which reads Ci95 to feed
-        # the sigmoid composition's intervals).
         dir_lo95, dir_hi95, _ = circ_quantiles(dir_samples, level=0.95)
         dir_lo80, dir_hi80, _ = circ_quantiles(dir_samples, level=0.80)
-        spd_lo95 = np.percentile(spd_samples, 2.5, axis=0)
-        spd_hi95 = np.percentile(spd_samples, 97.5, axis=0)
-        spd_lo80 = np.percentile(spd_samples, 10.0, axis=0)
-        spd_hi80 = np.percentile(spd_samples, 90.0, axis=0)
 
-        # Point estimates from μ (NOT MC mean — atan2 over MC samples is
-        # biased; use the parameter directly).
-        pt_speed = np.sqrt(mu_u ** 2 + mu_v ** 2)
+        # Speed CI: delta method projection of Σ onto the radial axis at
+        # (μ_u, μ_v). The MC marginal of ||N(μ, Σ)|| follows a Rice
+        # distribution whose mean and percentiles sit ABOVE ||μ|| by
+        # Jensen's inequality whenever σ is non-trivial relative to ||μ||.
+        # Reported 2026-05-28: light-wind hour with point speed 6 mph,
+        # MC CI80 = [7, 36] mph — the CI low was above the point and the
+        # high was wildly out of line with other models (LGB 5 mph,
+        # gust 11 mph). The MC is a faithful marginal of the latent (u,v)
+        # but communicates an upward bias the user can't compare to any
+        # other wind model.
+        #
+        # Delta method: linearise speed = sqrt(u² + v²) around (μ_u, μ_v).
+        #   ∂s/∂u = μ_u / ||μ|| ; ∂s/∂v = μ_v / ||μ|| ; so
+        #   σ²_speed = (μ_u² σ_u² + μ_v² σ_v² + 2 μ_u μ_v ρ σ_u σ_v) / ||μ||²
+        # CI is symmetric in Gaussian space around ||μ|| (z=1.282 for 80%,
+        # 1.96 for 95%), floored at 0 m/s. Loses the Rice tail at
+        # extremely light winds — acceptable trade since users can't
+        # interpret that tail anyway.
+        sig_u_cal = sig_u * alpha_spd
+        sig_v_cal = sig_v * alpha_spd
+        spd_mu = np.sqrt(mu_u ** 2 + mu_v ** 2)
+        spd_mu_safe = np.maximum(spd_mu, 1e-6)
+        var_spd = (mu_u ** 2 * sig_u_cal ** 2
+                   + mu_v ** 2 * sig_v_cal ** 2
+                   + 2.0 * mu_u * mu_v * rho * sig_u_cal * sig_v_cal) / spd_mu_safe ** 2
+        sig_spd = np.sqrt(np.maximum(var_spd, 0.0))
+        spd_lo95 = np.maximum(0.0, spd_mu - 1.96  * sig_spd)
+        spd_hi95 = spd_mu + 1.96  * sig_spd
+        spd_lo80 = np.maximum(0.0, spd_mu - 1.282 * sig_spd)
+        spd_hi80 = spd_mu + 1.282 * sig_spd
+
+        # Point estimates: ||μ|| for speed (centre of delta-method CI by
+        # construction); atan2(-μ) for direction. Both stable + easy to
+        # explain.
+        pt_speed = spd_mu
         pt_dir = (np.degrees(np.arctan2(-mu_u, -mu_v))) % 360.0
 
         # Per-NWP RunTime columns (RunTime_<nwp>_id → RunTimeUtcGfs etc.)

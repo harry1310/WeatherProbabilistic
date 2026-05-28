@@ -334,5 +334,16 @@ class TestPredictWindMvnSmoke:
                 <= (out["BlendSpeedCi95Hi"] - out["BlendSpeedCi95Lo"]) + 1e-6).all(), (
             "BlendSpeedCi80 width should be ≤ BlendSpeedCi95 width on every row"
         )
+        # Point estimate must lie INSIDE both CI bands. Regression for the
+        # 2026-05-28 bug where pt_speed = ||μ|| could fall below the MC
+        # 10th-percentile CI80 low bound because ||(u,v)|| with
+        # (u,v) ~ N(μ,Σ) has E[||·||] ≥ ||E[·]|| (Jensen) — the MC speed
+        # distribution sits above the location of the latent.
+        assert (out["BlendSpeedCi80Lo"] - 1e-6 <= out["BlendSpeedMagnitude"]).all(), (
+            "BlendSpeedMagnitude must be ≥ BlendSpeedCi80Lo"
+        )
+        assert (out["BlendSpeedMagnitude"] <= out["BlendSpeedCi80Hi"] + 1e-6).all(), (
+            "BlendSpeedMagnitude must be ≤ BlendSpeedCi80Hi"
+        )
         # Direction must wrap into [0, 360).
         assert ((out["BlendDirection"] >= 0) & (out["BlendDirection"] < 360)).all()
