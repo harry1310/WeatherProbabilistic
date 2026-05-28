@@ -294,7 +294,17 @@ def build_live_for_lead(location: str, lead: int, anchor: datetime,
         df[f"{label}_mean"] = df[src_cols].mean(axis=1, skipna=True)
         df[f"{label}_std"]  = df[src_cols].std(axis=1, skipna=True)
 
-    # Drop rows missing every feature (no NWP for this valid_time).
+    # Some NWPs may be entirely absent from the live forecast tree this
+    # cycle (e.g. GEM hasn't run for this anchor yet). The DuckDB pivot
+    # then omits those NWPs' wsp/wdir columns from `df`. pandas dropna
+    # raises KeyError on a subset that names a missing column, so add any
+    # absent feature as all-NaN to preserve the scaler's positional
+    # column-order contract. Rows that end up all-NaN across feature_names
+    # are then dropped as before — net effect is "soft-skip NWPs we don't
+    # have this cycle" rather than crashing the whole workflow.
+    for col in feature_names:
+        if col not in df.columns:
+            df[col] = float("nan")
     df = df.dropna(subset=feature_names, how="all").reset_index(drop=True)
     return df
 
