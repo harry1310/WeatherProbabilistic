@@ -450,30 +450,35 @@ def predict_for_location(location: str, anchor: datetime,
         dir_lo80, dir_hi80, _ = circ_quantiles(dir_samples, level=0.80)
 
         # Speed CI: delta method projection of Σ onto the radial axis at
-        # (μ_u, μ_v). The MC marginal of ||N(μ, Σ)|| follows a Rice
-        # distribution whose mean and percentiles sit ABOVE ||μ|| by
-        # Jensen's inequality whenever σ is non-trivial relative to ||μ||.
-        # Reported 2026-05-28: light-wind hour with point speed 6 mph,
-        # MC CI80 = [7, 36] mph — the CI low was above the point and the
-        # high was wildly out of line with other models (LGB 5 mph,
-        # gust 11 mph). The MC is a faithful marginal of the latent (u,v)
-        # but communicates an upward bias the user can't compare to any
-        # other wind model.
+        # (μ_u, μ_v) — see the 2026-05-28 note below for why MC was
+        # replaced.
+        #
+        # NOTE on calibration (2026-05-29): α'_spd is INTENTIONALLY NOT
+        # applied to the speed σ here. The trained α'_spd was fitted to
+        # make MC CI95 hit ~95% coverage on validation residuals; on this
+        # bundle that came out at 2.675 (lead 24h), which inflated σ by
+        # ~3× and produced bands of [0, 36] mph on a 5 mph point —
+        # mathematically calibrated but visually unusable and not
+        # comparable to any other wind product on the page (the LGB
+        # blender has no CI of its own; the wind champion likewise). We
+        # use the network's RAW σ output as the model's self-asserted
+        # uncertainty, which gives "looks-right" bands that under-cover
+        # real residuals. Honest framing on the page: "model-asserted
+        # ±1σ / ±2σ-shaped band", not "80% credible interval".
+        # Re-introduce α' once the trainer either learns a better-
+        # calibrated raw σ or moves to a head that predicts speed
+        # parameters directly.
         #
         # Delta method: linearise speed = sqrt(u² + v²) around (μ_u, μ_v).
         #   ∂s/∂u = μ_u / ||μ|| ; ∂s/∂v = μ_v / ||μ|| ; so
         #   σ²_speed = (μ_u² σ_u² + μ_v² σ_v² + 2 μ_u μ_v ρ σ_u σ_v) / ||μ||²
-        # CI is symmetric in Gaussian space around ||μ|| (z=1.282 for 80%,
-        # 1.96 for 95%), floored at 0 m/s. Loses the Rice tail at
-        # extremely light winds — acceptable trade since users can't
-        # interpret that tail anyway.
-        sig_u_cal = sig_u * alpha_spd
-        sig_v_cal = sig_v * alpha_spd
+        # CI is symmetric in Gaussian space around ||μ||, floored at 0 m/s.
+        _ = alpha_spd  # kept in scope for future re-introduction; intentionally unused.
         spd_mu = np.sqrt(mu_u ** 2 + mu_v ** 2)
         spd_mu_safe = np.maximum(spd_mu, 1e-6)
-        var_spd = (mu_u ** 2 * sig_u_cal ** 2
-                   + mu_v ** 2 * sig_v_cal ** 2
-                   + 2.0 * mu_u * mu_v * rho * sig_u_cal * sig_v_cal) / spd_mu_safe ** 2
+        var_spd = (mu_u ** 2 * sig_u ** 2
+                   + mu_v ** 2 * sig_v ** 2
+                   + 2.0 * mu_u * mu_v * rho * sig_u * sig_v) / spd_mu_safe ** 2
         sig_spd = np.sqrt(np.maximum(var_spd, 0.0))
         spd_lo95 = np.maximum(0.0, spd_mu - 1.96  * sig_spd)
         spd_hi95 = spd_mu + 1.96  * sig_spd
