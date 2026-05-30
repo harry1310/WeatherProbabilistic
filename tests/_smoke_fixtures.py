@@ -439,26 +439,40 @@ _DEFAULT_UPWIND_GAIN_5KM = {
 
 def make_orographic_static(
     root: Path,
-    location: str,
+    slug: str,
     *,
     terrain_gradient_dx: float = 0.10,
     terrain_gradient_dy: float = 0.05,
     upwind_gain_5km: dict | None = None,
+    elevation_vs_cell_m: float = 50.0,
+    relief_5km_m: float = 200.0,
+    terrain_ruggedness_5km_m: float = 80.0,
 ) -> Path:
-    """Write ``data/static/orographic/{location}.json`` with just the keys
-    ``oro_dynamic`` reads (terrain_gradient_dx/dy + upwind_gain_5km).
-    Numerically modelled on Bonehill's real values so the resulting
-    ORO_LEAN features are within the same order of magnitude as
-    production."""
+    """Write ``data/static/orographic/{slug}.json``. ``slug`` can be either
+    a location (e.g. ``bonehill_rocks``) for train_wind_mvn's per-location
+    lookup, or a station slug (e.g. ``ea_bellever_dartmoor``) for train_4a's
+    per-station rich+oro builder.
+
+    Includes both:
+      * ``upwind_gain_5km`` + ``terrain_gradient_dx/dy`` — read by
+        train_wind_mvn's oro_dynamic and 4a's v1 terrain block.
+      * ``elevation_vs_cell_m`` / ``relief_5km_m`` / ``terrain_ruggedness_5km_m``
+        — three additional static scalars read by 4a's v1 terrain block.
+    Numerically modelled on Bonehill's real values so the resulting feature
+    magnitudes match production within an order of magnitude.
+    """
     static_root = root / "static" / "orographic"
     static_root.mkdir(parents=True, exist_ok=True)
     payload = {
-        "slug": location,
+        "slug": slug,
         "terrain_gradient_dx": float(terrain_gradient_dx),
         "terrain_gradient_dy": float(terrain_gradient_dy),
         "upwind_gain_5km": dict(upwind_gain_5km or _DEFAULT_UPWIND_GAIN_5KM),
+        "elevation_vs_cell_m":      float(elevation_vs_cell_m),
+        "relief_5km_m":             float(relief_5km_m),
+        "terrain_ruggedness_5km_m": float(terrain_ruggedness_5km_m),
     }
-    out = static_root / f"{location}.json"
+    out = static_root / f"{slug}.json"
     out.write_text(json.dumps(payload, indent=2))
     return out
 

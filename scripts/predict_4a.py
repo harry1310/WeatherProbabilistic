@@ -79,6 +79,7 @@ ACTIVE_LOCATION = os.environ.get("WB_LOCATION", LOCATION)
 
 from _shared import (  # noqa: E402
     MODELS_LEAN,
+    build_rich_oro_features_live,
     lead_day_bucket,
     resolve_station,
 )
@@ -335,9 +336,40 @@ def predict_one_station(bundle_dir: Path, station_friendly: str,
             f"bundle {bundle_dir} has no `per_lead` block in preprocess.json — "
             f"likely a lead-pooled 4a bundle (use predict_4a.py instead).")
 
+    # Bundle-feature-spec dispatch (added 2026-05-30 for the rich-per-station
+    # rollout). Old lean bundles (22 + 3 syn features) keep the legacy
+    # build_live_features path; new rich+oro bundles (68 features) route
+    # through build_rich_oro_features_live. Detection key: presence of any
+    # `oro_*` feature in the bundle's saved feature list (rich+oro adds 9
+    # `oro_*` cols; lean has none). Per-bundle, NOT per-lead — every lead
+    # in a single bundle uses the same feature set.
+    sample_lead = next(iter(preprocess["per_lead"].values()))
+    sample_feats = sample_lead.get("feature_list_full", [])
+    is_rich_oro = any(f.startswith("oro_") for f in sample_feats)
+    spec_label = "rich+oro (68)" if is_rich_oro else "lean (25)"
+
     print(f"  bundle: {bundle_dir.name}", flush=True)
+    print(f"  feature spec: {spec_label} — n_features={len(sample_feats)}", flush=True)
     print(f"  building live features (horizon {HORIZON_DAYS}d)...", flush=True)
-    df_live = build_live_features(station_friendly, anchor)
+    if is_rich_oro:
+        # station_index for the oro_station_id column. Must match train_4a's
+        # assignment (position in stations_for_location). Per-station BART
+        # treats this as a constant so the value doesn't affect skill, but
+        # the live feature matrix needs SOME value in this column slot for
+        # the bundle's scaler to apply.
+        all_slugs = list(stations_for_location(ACTIVE_LOCATION))
+        station_slug, _ = resolve_station(station_friendly)
+        try:
+            station_index = all_slugs.index(station_slug)
+        except ValueError:
+            raise ValueError(
+                f"Station slug {station_slug!r} not in stations_for_location("
+                f"{ACTIVE_LOCATION!r}) — can't assign oro_station_id for predict.")
+        df_live = build_rich_oro_features_live(
+            station_friendly, station_slug, station_index, anchor,
+            horizon_days=HORIZON_DAYS, leads=LEADS)
+    else:
+        df_live = build_live_features(station_friendly, anchor)
     if len(df_live) == 0:
         print(f"  no live feature rows past anchor — emitting nothing", flush=True)
         return pd.DataFrame()

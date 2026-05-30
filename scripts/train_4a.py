@@ -93,10 +93,10 @@ ACTIVE_LOCATION = os.environ.get("WB_LOCATION", LOCATION)
 from src.retrain_guard import build_check_and_save_versioned  # noqa: E402
 
 from _shared import (  # noqa: E402
-    FEATURE_NAMES,
-    MODELS_LEAN,
-    add_synoptic_features,
-    build_features_via_duckdb,
+    MODELS_RICH,
+    RICH_ORO_FEATURE_NAMES,
+    build_rich_features_via_duckdb,
+    compose_v1_terrain_block,
     resolve_station,
     time_split,
 )
@@ -212,30 +212,49 @@ def _fit_and_store(cell: dict, lead: int) -> dict:
 def train_one_station(station_friendly: str, station_slug: str) -> dict:
     """Fit per-cell BART for every lead in LEADS for one station.
     Returns aggregate result dict with per-cell prep + fit info, ready
-    for write_per_cell_bundle to persist."""
-    syn_feats = ["wind_dir_sin_mean", "wind_dir_cos_mean", "surface_pressure_mean"]
-    base_feats = list(FEATURE_NAMES) + syn_feats   # NOTE: no "lead" — per-cell
+    for write_per_cell_bundle to persist.
 
+    Features = rich (59) + v1 oro terrain (9) = 68 (the rich-per-station
+    winner from the 2026-05-29 bake-off, ~5% Brier improvement vs the
+    prior lean 22-feature spec). Spec is canonicalised in
+    _shared.RICH_ORO_FEATURE_NAMES; bit-equivalence with the C# 3o
+    rich-oro feature builder is asserted by
+    tests/test_rich_oro_python_vs_csharp.py.
+    """
     # Per-phase training-data cutoff (2026-05-26 — see src.phase_registry).
     # 4a carries minValidTime: "2024-01-01" in phases.yaml; this lookup
     # returns None for any phase without the field. Resolved once per
-    # train invocation; passed to every build_features_via_duckdb call.
+    # train invocation; passed to every build call.
     from src.phase_registry import min_valid_time_for
     min_valid_time = min_valid_time_for("precipitation", "4a")
     if min_valid_time is not None:
         print(f"  Phase 4a training-data cutoff: ValidTimeUtc >= {min_valid_time.date().isoformat()} "
               f"(from phases.yaml)", flush=True)
 
+    # station_index = position in the active location's stations list.
+    # Used as the constant oro_station_id feature column; in per-station
+    # BART the value is constant per fit (dead column the model ignores),
+    # but we still need a value to fill the slot in RICH_ORO_FEATURE_NAMES.
+    all_station_slugs = list(stations_for_location(ACTIVE_LOCATION))
+    try:
+        station_index = all_station_slugs.index(station_slug)
+    except ValueError:
+        raise ValueError(
+            f"Station slug {station_slug!r} not in stations_for_location("
+            f"{ACTIVE_LOCATION!r}) = {all_station_slugs}. Cannot assign "
+            f"oro_station_id — check WeatherBlend's config.yaml.")
+
     per_cell: dict[int, dict] = {}
     per_lead_stats: list[dict] = []
     pred_frames: list[pd.DataFrame] = []
 
     for lead in LEADS:
-        print(f"\n  [{time.strftime('%H:%M:%S')}] lead {lead}h — building features", flush=True)
-        df = build_features_via_duckdb(station_friendly, lead, min_valid_time=min_valid_time)
-        df, syn_feats_added = add_synoptic_features(station_friendly, lead, df, min_valid_time=min_valid_time)
-        feats = list(FEATURE_NAMES) + syn_feats_added
-        cell = _prepare_cell(df, feats)
+        print(f"\n  [{time.strftime('%H:%M:%S')}] lead {lead}h — building features (rich+oro, 68)", flush=True)
+        df_rich = build_rich_features_via_duckdb(
+            station_friendly, lead, min_valid_time=min_valid_time)
+        df = compose_v1_terrain_block(
+            station_slug, station_index, lead, df_rich, min_valid_time=min_valid_time)
+        cell = _prepare_cell(df, RICH_ORO_FEATURE_NAMES)
         print(f"    rows: train {len(cell['y_train']):,} · val {len(cell['val_df']):,} · "
               f"test {len(cell['y_test']):,} · features kept {len(cell['feature_names_eff'])}", flush=True)
 
@@ -335,13 +354,13 @@ def write_per_cell_bundle(out_dir: Path, station_slug: str, station_friendly: st
     (out_dir / "preprocess.json").write_text(json.dumps(preprocess, indent=2))
 
     # 4) training_metadata.json + feature_schema.json — Models card + Spec.
-    nwp_models = [m for m, _ in MODELS_LEAN]
+    nwp_models = [m for m, _ in MODELS_RICH]
     metadata = {
         "Version":      version,
         "Target":       "precipitation",
         "Phase":        PHASE,
         "LocationName": ACTIVE_LOCATION,
-        "DataSource":   "open_meteo_previous_runs+ea_rainfall+dbarts_bart_per_cell",
+        "DataSource":   "open_meteo_previous_runs+ea_rainfall+dbarts_bart_per_cell+rich_oro",
         "TrainedAtUtc": datetime.now(timezone.utc).isoformat(),
         "Hyperparameters": {
             "library":           "dbarts (R) via rpy2",
@@ -370,14 +389,14 @@ def write_per_cell_bundle(out_dir: Path, station_slug: str, station_friendly: st
     schema_per_lead = {
         str(L): {
             "Target":         "precipitation",
-            "FeatureSet":     f"phase4a-percell-l{L:02}",
+            "FeatureSet":     f"phase4a-percell-richoro-l{L:02}",
             "LeadHours":      L,
             "RequiredModels": [],
             "OptionalModels": nwp_models,
             "Models":         nwp_models,
             "FeatureNames":   result["per_cell"][L]["feature_names_eff"],
             "DataSource":     "open_meteo_previous_runs",
-            "Tier":           "4a-percell",
+            "Tier":           "4a-percell-richoro",
             "UkvStrategy":    None,
         }
         for L in LEADS if L in result["per_cell"]

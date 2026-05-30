@@ -36,6 +36,7 @@ sys.path.insert(0, str(REPO_ROOT / "tests"))
 
 from _smoke_fixtures import (  # noqa: E402
     make_forecast_tree,
+    make_orographic_static,
     make_rainfall_truth,
     run_sync_train_data,
 )
@@ -97,6 +98,11 @@ def trained_bundle(smoke_root):
     make_rainfall_truth(
         fake_r2_data, LOCATION, STATION_FRIENDLY, TRAIN_START, n_days=TRAIN_DAYS,
     )
+    # train_4a's rich+oro builder reads data/static/orographic/{slug}.json
+    # for the per-station terrain block (3 static + 5 dynamic + station_id).
+    # Synth one for Bellever inside the fake-R2 root so sync_train_data
+    # pulls it alongside forecasts + rainfall.
+    make_orographic_static(fake_r2_data, STATION_SLUG)
     run_sync_train_data(
         location=LOCATION, phases="4a",
         r2_source=fake_r2, local_root=smoke_root,
@@ -176,10 +182,16 @@ class TestTrain4aSmoke:
         assert pre["ntree"] == int(SMOKE_BART_ENV["WB_BART_NTREE"])
         for lead in ("24", "48", "72", "96", "120"):
             entry = pre["per_lead"][lead]
-            # 25 features = 22 base (_shared.FEATURE_NAMES) + 3 synoptic
-            # (wind_dir_sin/cos + surface_pressure) added by
-            # add_synoptic_features.
-            assert len(entry["feature_list_full"]) == 25
+            # 68 features = rich (59 — _shared.RICH_FEATURE_NAMES) + 9 v1 oro
+            # terrain (_shared.V1_TERRAIN_FEATURE_NAMES). Bumped from 25 (lean
+            # + 3 syn) on 2026-05-30 when train_4a swapped to the rich+oro
+            # spec — the per-station BART winner from the 2026-05-29 bake-off.
+            assert len(entry["feature_list_full"]) == 68
+            # oro_* features must be present — confirms compose_v1_terrain_block
+            # ran and produced terrain columns the dispatcher in predict_4a
+            # will route through the rich+oro live builder.
+            assert any(f.startswith("oro_") for f in entry["feature_list_full"]), \
+                "expected oro_* features in feature_list_full; rich+oro swap may have regressed"
             assert len(entry["scaler_mean"]) == len(entry["feature_names_eff"])
             assert len(entry["scaler_scale"]) == len(entry["feature_names_eff"])
             assert "kept_indices" in entry

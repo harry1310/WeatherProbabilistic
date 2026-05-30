@@ -77,8 +77,13 @@ for p in "${phases[@]}"; do
     # into the EXISTING Active list (preserving WB-side .NET phase
     # entries). Without the MANIFEST pull, promote starts blank and
     # clobbers Bonehill on the next push.
+    # static/orographic pull added 2026-05-30 alongside the rich+oro
+    # feature swap — compose_v1_terrain_block reads
+    # data/static/orographic/{station_slug}.json for the 9-feature
+    # terrain block. Without this pull the Sunday retrain would
+    # FileNotFoundError on the first cell.
     4a)
-      need_forecasts=1; need_rainfall=1; need_precip_manifest=1 ;;
+      need_forecasts=1; need_rainfall=1; need_precip_manifest=1; need_orographic=1 ;;
 
     # NGBoost-LogNormal rainfall amount. Same data as 4a + a separate
     # rainfall_amount MANIFEST (its own target tree).
