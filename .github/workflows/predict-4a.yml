@@ -113,7 +113,7 @@ jobs:
           mkdir -p ./config
           rclone copy "r2:${R2_BUCKET}/config/config.yaml" ./config/ --checkers 4
 
-      - name: Pull live forecast tree + EA rainfall + saved BART bundles from R2
+      - name: Pull live forecast tree + EA rainfall + orographic + saved BART bundles from R2
         # Live forecast tree (RunTimeSource='reported') for prediction
         # features.
         #
@@ -144,6 +144,15 @@ jobs:
           rclone copy "r2:${R2_BUCKET}/data/truth/rainfall" \
             "../WeatherBlend/data/truth/rainfall" \
             --fast-list --transfers 16 --checkers 32
+          # Static orographic JSON — feeds the rich-oro oro_* terrain features
+          # (build_rich_oro_features_live reads data/static/orographic/{slug}.json
+          # per station). Same dependency set as 3o: forecasts + rainfall +
+          # orographic + models. Missing this was the 2nd half of the
+          # 2026-05-31 predict-4a failure (surfaced once rainfall was added).
+          mkdir -p ../WeatherBlend/data/static/orographic
+          rclone copy "r2:${R2_BUCKET}/data/static/orographic" \
+            "../WeatherBlend/data/static/orographic" \
+            --include '*.json' --checkers 8
           # Saved BART bundles: pull ONLY the newest *phase4a* version per
           # station. predict reads just the latest, but 4a versions
           # accumulate every retrain — globbing **/*phase4a*/** pulled the

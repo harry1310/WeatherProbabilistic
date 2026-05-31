@@ -35,12 +35,21 @@ def test_rich_oro_live_builder_reads_rainfall():
     )
 
 
-def test_predict_4a_workflow_pulls_rainfall_truth():
+def test_predict_4a_workflow_pulls_all_rich_oro_inputs():
+    """predict-4a.yml must pull every tree the rich+oro live builder reads.
+    The 2026-05-31 failure hit these one at a time (rainfall, then orographic),
+    so assert the FULL set here. The rich-oro dependency set mirrors phase 3o:
+    forecasts + EA rainfall + static orographic + saved bundles."""
     text = PREDICT_4A_YML.read_text(encoding="utf-8")
-    assert "data/truth/rainfall" in text, (
-        "predict-4a.yml must rclone-pull data/truth/rainfall: 4a's rich+oro "
-        "bundles build antecedent-rain features at predict time "
-        "(_shared.build_rich_oro_features_live -> _load_hourly_rain). Without "
-        "the pull, predict_4a crashes on an empty rainfall glob (the "
-        "2026-05-31 failure)."
+    required = {
+        "data/truth/rainfall": "antecedent-rain features (_load_hourly_rain)",
+        "data/static/orographic": "oro_* terrain features (per-station {slug}.json)",
+        "data/forecasts/location=": "NWP forecast features",
+        "data/models/precipitation": "the saved BART bundles to load",
+    }
+    missing = [f"{tree}  ({why})" for tree, why in required.items() if tree not in text]
+    assert not missing, (
+        "predict-4a.yml is missing rclone pulls the rich+oro predict path needs "
+        "(build_rich_oro_features_live). Each missing tree crashes predict_4a "
+        "live. Missing:\n  " + "\n  ".join(missing)
     )
