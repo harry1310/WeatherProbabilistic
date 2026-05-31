@@ -522,13 +522,18 @@ def run_sync_train_data(
     phases: str,
     r2_source: Path,
     local_root: Path,
+    mode: str = "train",
 ) -> None:
     """Invoke ``scripts/sync_train_data.sh`` against a local fake-R2 dir.
 
     Mirrors the production "Pull data trees from R2" step in
-    ``retrain-python.yml`` exactly — same script, same arg shape — so a
-    missing pull declaration fails the smoke at PR time rather than
-    "Loaded 0 rows" in a Sunday retrain.
+    ``retrain-python.yml`` (train) / ``predict-*.yml`` (predict) exactly —
+    same script, same arg shape — so a missing pull declaration fails the
+    smoke at PR time rather than "Loaded 0 rows"/FileNotFound in production.
+
+    ``mode`` ("train" | "predict") sets the MODE env the script reads:
+    predict pulls the feature trees + latest model bundle a phase reads at
+    predict time, train pulls feature trees + truth labels + the manifest.
 
     Required layout in ``r2_source``: fixtures written to
     ``r2_source/data/forecasts/…``, ``r2_source/data/truth/…`` etc. (the
@@ -548,6 +553,7 @@ def run_sync_train_data(
     env = os.environ.copy()
     env["R2_SOURCE"] = str(r2_source)
     env["LOCAL_ROOT"] = str(local_root)
+    env["MODE"] = mode
     bash_exe = _locate_bash()
     result = subprocess.run(
         [bash_exe, str(SYNC_SCRIPT), location, phases],
