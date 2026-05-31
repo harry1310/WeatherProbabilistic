@@ -191,10 +191,13 @@ jobs:
         run: |
           # yq is pre-installed on ubuntu-latest (mikefarah/yq).
           PHASES_YAML=./config/phases.yaml
-          # One "id|loc1,loc2" row per impl=python phase (empty = all locations).
+          # One "id|loc1,loc2" row per TRAINED impl=python phase (empty = all
+          # locations). retrain:none phases are predict-time-only (no train
+          # step) and are excluded — mirrors retrain-blenders.yml.
           mapfile -t PHASE_ROWS < <(yq -r '
             .targets | to_entries[].value.phases[]
             | select(.impl == "python")
+            | select((.retrain // "") != "none")
             | .id + "|" + ((.locations // []) | join(","))
           ' "$PHASES_YAML")
           PYTHON_PHASES=$(printf '%s\n' "${PHASE_ROWS[@]}" | cut -d'|' -f1 | paste -sd, -)

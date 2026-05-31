@@ -113,9 +113,20 @@ jobs:
           mkdir -p ./config
           rclone copy "r2:${R2_BUCKET}/config/config.yaml" ./config/ --checkers 4
 
-      - name: Pull live forecast tree + saved BART bundles from R2
+      - name: Pull live forecast tree + EA rainfall + saved BART bundles from R2
         # Live forecast tree (RunTimeSource='reported') for prediction
-        # features. NO truth pull — predict has no labels to join.
+        # features.
+        #
+        # EA rainfall truth IS pulled (2026-05-31): since commit 3641d44
+        # ("swap to per-station rich+oro (68 features) BART") 4a's rich-oro
+        # bundles use antecedent-rain FEATURES (ea_rain_prev_24h_mm etc.,
+        # built by _shared.build_rich_oro_features_live -> _load_hourly_rain),
+        # not just labels. predict_one_station routes to the rich-oro builder
+        # whenever the loaded bundle has oro_* features, so once the first
+        # rich+oro bundle was minted, predict needs the rainfall tree. The
+        # old comment ("NO truth pull — predict has no labels") predated the
+        # rich-oro swap and caused the 2026-05-31 predict-4a failure.
+        #
         # Saved bundles (state.rds + arrays.npz + preprocess.json + the
         # two metadata json files) come from retrain-python.yml's 4a
         # training; predict reads the latest *phase4a* version dir per station.
@@ -128,6 +139,11 @@ jobs:
               "../WeatherBlend/data/forecasts/location=bonehill_rocks/model=$m" \
               --fast-list --transfers 16 --checkers 32
           done
+          # EA rainfall truth — feeds the rich-oro antecedent-rain features.
+          mkdir -p ../WeatherBlend/data/truth/rainfall
+          rclone copy "r2:${R2_BUCKET}/data/truth/rainfall" \
+            "../WeatherBlend/data/truth/rainfall" \
+            --fast-list --transfers 16 --checkers 32
           # Saved BART bundles: pull ONLY the newest *phase4a* version per
           # station. predict reads just the latest, but 4a versions
           # accumulate every retrain — globbing **/*phase4a*/** pulled the
