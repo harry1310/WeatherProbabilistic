@@ -27,6 +27,11 @@
 #   LOCAL_ROOT  Destination root (default: ../WeatherBlend/data — the
 #               production layout where this repo runs alongside the WB
 #               checkout on the runner).
+#   MODE        train (default) | predict. train = feature trees + truth
+#               labels + promote-target MANIFEST. predict = feature trees +
+#               the latest saved model bundle per cell, no labels/MANIFEST.
+#               Predict workflows set MODE=predict so they pull via the SAME
+#               declaration as train (no more hand-rolled rclone that drifts).
 #
 # Exit codes:
 #   0  success
@@ -45,6 +50,18 @@ location="$1"
 phases_csv="$2"
 : "${R2_SOURCE:?R2_SOURCE env var required (e.g. r2:weatherblend or /tmp/fake-r2)}"
 LOCAL_ROOT="${LOCAL_ROOT:-../WeatherBlend/data}"
+
+# MODE selects the pull set (2026-05-31). Default `train` keeps every existing
+# caller (retrain-python.yml + train smoke) unchanged. `predict` pulls the
+# feature trees a phase reads at PREDICT time PLUS its saved model bundle, and
+# skips truth-as-label trees + the promote-target MANIFEST. Same single source
+# of truth drives both, so predict workflows can stop hand-rolling rclone (the
+# divergence that caused the 2026-05-31 predict-4a failures).
+MODE="${MODE:-train}"
+case "$MODE" in
+  train|predict) ;;
+  *) echo "::error::MODE must be 'train' or 'predict' (got '$MODE')"; exit 2 ;;
+esac
 
 mkdir -p "$LOCAL_ROOT"
 cd "$LOCAL_ROOT"
@@ -68,6 +85,11 @@ need_orographic=0
 need_precip_manifest=0
 need_rainfall_amount_manifest=0
 need_wind_direction_manifest=0
+# Predict-mode: name the model-bundle tree (target) + phase-version glob to
+# pull the latest bundle per cell for. Empty = no bundle pull.
+bundle_precipitation=""
+bundle_rainfall_amount=""
+bundle_wind_direction=""
 
 IFS=',' read -ra phases <<< "$phases_csv"
 for p in "${phases[@]}"; do
@@ -82,21 +104,36 @@ for p in "${phases[@]}"; do
     # data/static/orographic/{station_slug}.json for the 9-feature
     # terrain block. Without this pull the Sunday retrain would
     # FileNotFoundError on the first cell.
+    # Per-cell BART precipitation. Rich+oro builder reads forecasts +
+    # orographic + antecedent EA rainfall — at BOTH train and predict
+    # (rainfall is the label AND the ea_rain_prev_* features). Train also
+    # needs the precip MANIFEST (train_4a promotes into the existing Active
+    # list); predict instead needs the latest phase4a bundle per cell.
     4a)
-      need_forecasts=1; need_rainfall=1; need_precip_manifest=1; need_orographic=1 ;;
+      need_forecasts=1; need_orographic=1; need_rainfall=1
+      if [ "$MODE" = "train" ]; then need_precip_manifest=1
+      else bundle_precipitation="phase4a"; fi ;;
 
-    # NGBoost-LogNormal rainfall amount. Same data as 4a + a separate
-    # rainfall_amount MANIFEST (its own target tree).
+    # NGBoost-LogNormal rainfall amount. Train: same data as 4a + the
+    # rainfall_amount MANIFEST. Predict: forecasts + latest phase3f bundle.
+    # NOTE: 3f predict ALSO needs the bound 3a champion PREDICTIONS, but
+    # the version is pinned in the 3f bundle's training_metadata at runtime,
+    # so that pull stays inline in predict-3f.yml (can't be declared here).
     3f)
-      need_forecasts=1; need_rainfall=1
-      need_precip_manifest=1            # train_3f reads bound 3a champion version
-      need_rainfall_amount_manifest=1 ;;
+      need_forecasts=1
+      if [ "$MODE" = "train" ]; then
+        need_rainfall=1; need_precip_manifest=1; need_rainfall_amount_manifest=1
+      else
+        bundle_rainfall_amount="phase3f"
+      fi ;;
 
-    # Phase 2 wind_mvn (PyTorch MLP MVN). Forecasts + Dunkeswell MIDAS
-    # truth + static orographic JSON + wind_direction MANIFEST.
+    # Phase 2 wind_mvn (PyTorch MLP MVN). Forecasts + static orographic at
+    # BOTH modes. Train: Dunkeswell MIDAS truth (label) + wind_direction
+    # MANIFEST. Predict: the latest wind_mvn bundle.
     wind_mvn)
-      need_forecasts=1; need_midas=1; need_orographic=1
-      need_wind_direction_manifest=1 ;;
+      need_forecasts=1; need_orographic=1
+      if [ "$MODE" = "train" ]; then need_midas=1; need_wind_direction_manifest=1
+      else bundle_wind_direction="wind_mvn"; fi ;;
 
     *)
       echo "::error::sync_train_data: unknown python phase '$p' — add it to scripts/sync_train_data.sh."
@@ -185,6 +222,34 @@ if [ "$need_wind_direction_manifest" -gt 0 ]; then
   copyto_manifest "wind_direction"
 fi
 
-echo "sync_train_data: done."
+# Predict-mode model bundles. Pull the LATEST bundle matching the phase-version
+# glob per cell (station or location) under models/<target>/. Mirrors the
+# hand-rolled loops the predict workflows used (lexicographic max of the
+# phase-tagged version dirs) — now declared once so predict + smoke agree.
+pull_latest_bundle() {
+  local target="$1" phase_glob="$2"
+  echo "::group::sync_train_data: pull latest *${phase_glob}* bundles under models/${target}"
+  mkdir -p "models/${target}"
+  local cell latest
+  for cell in $(rclone lsf "${R2_SOURCE%/}/data/models/${target}/" --dirs-only 2>/dev/null); do
+    cell="${cell%/}"
+    latest=$(rclone lsf "${R2_SOURCE%/}/data/models/${target}/${cell}/" --dirs-only 2>/dev/null \
+      | grep "$phase_glob" | sort | tail -1)
+    latest="${latest%/}"
+    [ -z "$latest" ] && continue
+    echo "  ${target}/${cell}: ${latest}"
+    rclone copy "${R2_SOURCE%/}/data/models/${target}/${cell}/${latest}" \
+      "models/${target}/${cell}/${latest}" \
+      --fast-list --transfers 16 --checkers 32 --s3-no-check-bucket
+  done
+  echo "::endgroup::"
+}
+
+[ -n "$bundle_precipitation" ]    && pull_latest_bundle "precipitation"    "$bundle_precipitation"
+[ -n "$bundle_rainfall_amount" ]  && pull_latest_bundle "rainfall_amount"  "$bundle_rainfall_amount"
+[ -n "$bundle_wind_direction" ]   && pull_latest_bundle "wind_direction"   "$bundle_wind_direction"
+
+echo "sync_train_data: done (mode=$MODE)."
 echo "  forecasts=$need_forecasts rainfall=$need_rainfall midas=$need_midas orographic=$need_orographic"
 echo "  manifests: precip=$need_precip_manifest rainfall_amount=$need_rainfall_amount_manifest wind_direction=$need_wind_direction_manifest"
+echo "  bundles: precip='$bundle_precipitation' rainfall_amount='$bundle_rainfall_amount' wind_direction='$bundle_wind_direction'"
