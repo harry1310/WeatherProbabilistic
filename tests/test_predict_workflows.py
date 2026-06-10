@@ -69,6 +69,20 @@ def test_no_predict_workflow_hand_rolls_a_feature_tree():
     assert not problems, "\n  ".join(problems)
 
 
+def test_wind_speed_lgb_push_include_is_rooted():
+    """Regression for the 2026-06-10 08:53Z cycle: rclone's '**/x' include
+    needs ≥1 parent path segment, and the wind element tree has its
+    model_version= dirs at the COPY ROOT — the unrooted include matched
+    nothing and the banded predictions silently never reached R2
+    (Transferred 0 B / Checks 0/0). Pin the rooted form."""
+    text = (WF_DIR / "predict-wind-direction.yml").read_text(encoding="utf-8")
+    assert "--include '/model_version=*wind_speed_lgb*/**'" in text, (
+        "the wind_speed_lgb push include must be ROOTED ('/model_version=…') — "
+        "an unrooted '**/model_version=…' silently pushes nothing from a tree "
+        "whose model_version dirs sit at the copy root"
+    )
+
+
 def test_shared_rich_oro_builder_still_reads_rainfall_and_orographic():
     """Anchor: if the rich-oro builder stops reading rainfall/orographic, the
     sync-script predict declarations (and these guards) should be revisited."""

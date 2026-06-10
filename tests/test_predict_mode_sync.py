@@ -114,6 +114,29 @@ def test_predict_mode_wind_speed_lgb_pulls_latest_lgb_bundle_only(tmp_path):
     assert not any(s.startswith("truth/midas/") for s in f), f
 
 
+def test_predict_mode_survives_cells_without_the_phase(tmp_path):
+    """Regression for the 2026-06-10 predict-4a failure (run 27264913136):
+    models/precipitation holds EVERY location's gauges, and a cell with no
+    phase4a bundle (each Membury/Sennen gauge) made pull_latest_bundle's
+    grep exit 1 — under `set -euo pipefail` that killed the whole sync. A
+    phase-less cell must be SKIPPED, and cells after it still pulled. Cells
+    placed both before and after the real one pin skip-and-continue."""
+    root = tmp_path / "r2"; d = root / "data"
+    _touch(d / "forecasts/location=bonehill_rocks/model=gfs_seamless/date=2026-01-01/run=00.parquet")
+    _touch(d / "truth/rainfall/ea_bellever_dartmoor/r.parquet")
+    _touch(d / "static/orographic/ea_bellever_dartmoor.json")
+    _touch(d / "models/precipitation/ea_aaa_membury_no_4a/v2026-05-01_phase3c/model.zip")
+    _touch(d / "models/precipitation/ea_bellever_dartmoor/v2026-05-01_phase4a/state.rds")
+    _touch(d / "models/precipitation/ea_zzz_sennen_no_4a/v2026-05-01_phase3c/model.zip")
+    dest = tmp_path / "dest"
+    run_sync_train_data(location="bonehill_rocks", phases="4a",
+                        r2_source=root, local_root=dest, mode="predict")
+    f = _files(dest)
+    assert any("ea_bellever_dartmoor/v2026-05-01_phase4a/state.rds" in s for s in f), f
+    assert not any("ea_aaa_membury_no_4a" in s for s in f), f
+    assert not any("ea_zzz_sennen_no_4a" in s for s in f), f
+
+
 def test_train_mode_wind_speed_lgb_pulls_wind_manifest_and_midas(tmp_path):
     """Train-mode inverse: wind_speed_lgb pulls the wind MANIFEST (promote
     target) + MIDAS truth, and no model bundle (train mints fresh)."""

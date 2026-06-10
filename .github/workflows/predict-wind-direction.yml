@@ -193,11 +193,17 @@ jobs:
           # no location subdir) — same directory guard, scoped to the
           # *_wind_speed_lgb model_version dirs so the .NET-written champion
           # wind + wind_blend dirs in the same tree are never touched.
+          # ROOTED include (leading /): the model_version= dirs sit at the
+          # COPY ROOT here, and rclone's '**/x' needs at least one parent
+          # segment — the wind_direction push above only matches because its
+          # tree has a {location}/ level. The unrooted form silently pushed
+          # NOTHING on the first live cycle (2026-06-10 08:53Z run:
+          # "Transferred: 0 B, Checks: 0/0, Listed 87").
           WIND_ROOT=../WeatherBlend/data/predictions/wind
           if [ -d "$WIND_ROOT" ] && [ -n "$(find "$WIND_ROOT" -path '*wind_speed_lgb*' -name '*.parquet' -print -quit 2>/dev/null)" ]; then
             rclone copy "$WIND_ROOT" \
               "r2:${R2_BUCKET}/data/predictions/wind" \
-              --include '**/model_version=*wind_speed_lgb*/**' \
+              --include '/model_version=*wind_speed_lgb*/**' \
               --fast-list --transfers 16 --checkers 32 --progress --s3-no-check-bucket
           else
             echo "::notice::No wind_speed_lgb predictions produced this cycle (likely no *_wind_speed_lgb bundle on R2 yet) — skipping R2 push."

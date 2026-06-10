@@ -251,8 +251,16 @@ pull_latest_bundle() {
   local cell latest
   for cell in $(rclone lsf "${R2_SOURCE%/}/data/models/${target}/" --dirs-only 2>/dev/null); do
     cell="${cell%/}"
+    # `|| true`: a cell with NO bundle of this phase is normal — e.g.
+    # models/precipitation holds ALL locations' gauges but only Bonehill has
+    # phase4a. Without it, grep's no-match exit 1 + `set -euo pipefail` kills
+    # the whole sync (the 2026-06-10 predict-4a failure, run 27264913136 —
+    # died on ea_chards_snowdon_hill, the first 4a-less Membury gauge; the
+    # pre-MODE=predict hand-rolled loops survived because workflow shells
+    # have -e but NOT pipefail). The empty-`latest` continue below is the
+    # intended skip path.
     latest=$(rclone lsf "${R2_SOURCE%/}/data/models/${target}/${cell}/" --dirs-only 2>/dev/null \
-      | grep "$phase_glob" | sort | tail -1)
+      | grep "$phase_glob" | sort | tail -1 || true)
     latest="${latest%/}"
     [ -z "$latest" ] && continue
     echo "  ${target}/${cell}: ${latest}"
