@@ -136,12 +136,20 @@ class TestTrainWindSpeedLgbSmoke:
         assert metadata["Phase"] == "wind_speed_lgb"
         assert metadata["LocationName"] == LOCATION
         assert "cross-conformal" in metadata["Hyperparameters"]["conformal"]
+        nwps = {"gfs_seamless", "ecmwf_ifs025", "icon_seamless",
+                "gem_seamless", "ukmo_seamless", "jma_seamless"}
         for lead in LEADS:
             entry = metadata["PerLead"][str(lead)]
             assert entry["TrainRows"] > 0
             assert entry["TestRows"] > 0
             # BlendTestMae carries q50 MAE — the Models page card reads it.
             assert entry["BlendTestMae"] is not None
+            # The card's Δ-vs-best-single baseline must be a REAL per-NWP
+            # MAE, not the blend's own number (the pre-2026-06-10 placeholder
+            # that made the Models wind card read Δ 0% everywhere).
+            assert entry["BestSingle"] in nwps, entry["BestSingle"]
+            assert entry["BestSingleTestMae"] > 0
+            assert entry["BestSingleValMae"] > 0
 
     def test_feature_schema_locks_29_production_features(self, trained_bundle):
         schema = json.loads((trained_bundle / "feature_schema.json").read_text())

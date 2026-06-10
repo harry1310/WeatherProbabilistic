@@ -460,6 +460,39 @@ def circ_diff(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return np.minimum(d, 360.0 - d)
 
 
+def _finite_or(value, fallback: float) -> float:
+    """value as float when finite, else fallback — metadata doubles must
+    never be null/NaN (the .NET deserialiser rejects both)."""
+    try:
+        v = float(value)
+        return v if np.isfinite(v) else float(fallback)
+    except (TypeError, ValueError):
+        return float(fallback)
+
+
+def best_single_nwp_dir_mae(df_slice: pd.DataFrame, truth_dir: np.ndarray) -> tuple[str, float]:
+    """Best single NWP's circular direction MAE on a data slice — the Models
+    page card's 'Δ vs best single NWP' baseline. Until 2026-06-10 the bundle
+    stamped the BLEND's own MAE here, so the card's delta read 0% at every
+    lead for the Dunkeswell-truth models. Returns ("", nan) when no NWP has
+    enough rows (card falls back to its em-dash)."""
+    best_name, best_mae = "", float("nan")
+    for nwp in NWPS:
+        col = f"WindDirection10m_{nwp}"
+        if col not in df_slice.columns:
+            continue
+        v = df_slice[col].to_numpy(dtype="float64")
+        ok = ~np.isnan(v) & ~np.isnan(truth_dir)
+        # Floor of 20: enough to reject a truly degenerate column without
+        # tripping on the smoke fixtures' ~30-row val/test slices.
+        if ok.sum() < 20:
+            continue
+        mae = float(np.mean(circ_diff(v[ok], truth_dir[ok])))
+        if not (mae >= best_mae):   # NaN-safe "is better"
+            best_name, best_mae = nwp, mae
+    return best_name, best_mae
+
+
 def circ_quantiles_95(angles_deg: np.ndarray):
     """Per-row minimum-width 95% interval over MC samples (deg)."""
     M, N = angles_deg.shape
@@ -644,12 +677,20 @@ def write_bundle(out_dir: Path, location: str, version: str,
             "TrainRows":         int(cell["n_train"]),
             "ValRows":           int(cell["n_val"]),
             "TestRows":          int(cell["n_test"]),
-            "BestSingle":        "wind_mvn_mlp",
+            # BestSingle* = the best single NWP's direction MAE on the same
+            # val/test slices (the Models card's Δ baseline). Pre-2026-06-10
+            # bundles stamped the blend's own MAE (Δ read 0%) and val carried
+            # an NLL (wrong units) — both fixed; the card refreshes at the
+            # next retrain. Degenerate slice (no NWP with enough rows) falls
+            # back to the blend's own MAE — NEVER null/NaN, the .NET
+            # PerLeadStats deserialiser rejects both (the 2026-05-12 4a
+            # incident).
+            "BestSingle":        cell.get("best_single_nwp") or "wind_mvn_mlp",
             "BlendTestMae":      float(cell["test_dir_mae_deg"]),  # repurposed: dir MAE °
             "BlendTestRmse":     float(cell["test_spd_mae_ms"]),   # repurposed: spd MAE m/s
             "BlendTestBias":     None,
-            "BestSingleValMae":  float(cell["val_nll"]),
-            "BestSingleTestMae": float(cell["test_dir_mae_deg"]),
+            "BestSingleValMae":  _finite_or(cell.get("best_single_dir_mae_va"), float(cell["test_dir_mae_deg"])),
+            "BestSingleTestMae": _finite_or(cell.get("best_single_dir_mae_te"), float(cell["test_dir_mae_deg"])),
             "DataRangeTrain":    cell["range_train"],
             "DataRangeVal":      cell["range_val"],
             "DataRangeTest":     cell["range_test"],
@@ -835,6 +876,13 @@ def train_one_location(location: str, version: str,
         log.info("  test point: direction MAE = %.3f°,  speed MAE = %.4f m/s",
                  dir_mae_te, spd_mae_te)
 
+        # Best single NWP direction MAE on the SAME val/test slices — the
+        # Models card's Δ baseline (see best_single_nwp_dir_mae).
+        best_nwp, best_dir_mae_te = best_single_nwp_dir_mae(df_te, truth_dir_te)
+        _,        best_dir_mae_va = best_single_nwp_dir_mae(df_va, truth_dir_va)
+        log.info("  best single NWP (test dir MAE): %s = %.3f°",
+                 best_nwp or "(none)", best_dir_mae_te)
+
         # Persist per-row test predictions for verify.
         test_predictions = pd.DataFrame({
             "ValidTimeUtc": df_te["ValidTimeUtc"].values,
@@ -860,6 +908,9 @@ def train_one_location(location: str, version: str,
             "n_train":      d["n_train"], "n_val": d["n_val"], "n_test": d["n_test"],
             "test_dir_mae_deg": dir_mae_te,
             "test_spd_mae_ms":  spd_mae_te,
+            "best_single_nwp":         best_nwp,
+            "best_single_dir_mae_te":  best_dir_mae_te,
+            "best_single_dir_mae_va":  best_dir_mae_va,
             "range_train":  f"{d['valid_train_range'][0]} -> {d['valid_train_range'][1]}",
             "range_val":    f"{d['valid_val_range'][0]} -> {d['valid_val_range'][1]}",
             "range_test":   f"{d['valid_test_range'][0]} -> {d['valid_test_range'][1]}",

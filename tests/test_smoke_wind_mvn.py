@@ -159,12 +159,20 @@ class TestTrainWindMvnSmoke:
         assert metadata["Phase"] == "wind_mvn"
         assert metadata["Target"] == "wind_direction"
         assert metadata["LocationName"] == LOCATION
+        nwps = {"gfs_seamless", "ecmwf_ifs025", "icon_seamless",
+                "gem_seamless", "ukmo_seamless", "jma_seamless"}
         # Per-lead block populated for every trained lead.
         for lead in LEADS:
             entry = metadata["PerLead"][str(lead)]
             assert entry["TrainRows"] > 0, f"lead {lead}h has zero TrainRows"
             assert entry["ValRows"] > 0,   f"lead {lead}h has zero ValRows"
             assert entry["TestRows"] > 0,  f"lead {lead}h has zero TestRows"
+            # The Models card's Δ-vs-best-single baseline must be a REAL
+            # per-NWP direction MAE (pre-2026-06-10 it was the blend's own
+            # MAE → Δ 0% everywhere, and the val slot carried an NLL).
+            assert entry["BestSingle"] in nwps, entry["BestSingle"]
+            assert entry["BestSingleTestMae"] > 0
+            assert entry["BestSingleValMae"] > 0
 
     def test_feature_schema_locks_29_production_features(self, trained_bundle):
         schema = json.loads((trained_bundle / "feature_schema.json").read_text())

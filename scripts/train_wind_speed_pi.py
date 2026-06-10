@@ -171,6 +171,38 @@ def _crossconf_oof_scores(X, y, coverage, k_folds, lo_iters, hi_iters):
     return oof_e, oof_lo, oof_hi, y
 
 
+def _best_single_nwp_wsp_mae(df_slice, y_slice):
+    """Best single NWP's wind-speed MAE on a data slice — the Models page
+    card's 'Δ vs best single NWP' baseline. Until 2026-06-10 the bundle
+    stamped q50's own MAE here, so the card's delta read 0% at every lead.
+    Returns ("", nan) when no NWP has enough rows."""
+    best_name, best_mae = "", float("nan")
+    for m in T.NWPS:
+        col = f"WindSpeed10m_{m}"
+        if col not in df_slice.columns:
+            continue
+        v = df_slice[col].to_numpy(dtype="float64")
+        ok = ~np.isnan(v) & ~np.isnan(y_slice)
+        # Floor of 20: enough to reject a truly degenerate column without
+        # tripping on the smoke fixtures' small val/test slices.
+        if ok.sum() < 20:
+            continue
+        mae = float(np.mean(np.abs(v[ok] - y_slice[ok])))
+        if not (mae >= best_mae):   # NaN-safe "is better"
+            best_name, best_mae = m, mae
+    return best_name, best_mae
+
+
+def _finite_or(value, fallback):
+    """Metadata doubles must never be null/NaN — the .NET PerLeadStats
+    deserialiser rejects both (the 2026-05-12 4a incident)."""
+    try:
+        v = float(value)
+        return v if math.isfinite(v) else float(fallback)
+    except (TypeError, ValueError):
+        return float(fallback)
+
+
 def _required_filter(df, feats=None):
     """Apply the .NET WindSpeedLgbFeatureBuilder required-models dropna: drop any
     row where any required NWP lacks wsp or wdir. Returns a sorted, reindexed copy."""
@@ -228,6 +260,8 @@ def train_location(location: str, models_root: Path, leads=T.LEADS,
             range_test = f"{df.iloc[i_te]['ValidTimeUtc']} -> {df.iloc[n-1]['ValidTimeUtc']}"
             test_months = int(df.iloc[i_te:]["ValidTimeUtc"].dt.to_period("M").nunique())
             test_lo_hi = df.iloc[i_te], df.iloc[n-1]
+            bs_val_df, bs_val_y = df.iloc[i_tr:i_te], yval
+            bs_test_df, bs_test_y = df.iloc[i_te:], yte
         else:  # permissive
             # Keep EVERY valid-time build_features returned (>=1 NWP present), incl.
             # the feature-sparse 2022-23 rows (missing models stay NaN; LightGBM
@@ -254,6 +288,8 @@ def train_location(location: str, models_root: Path, leads=T.LEADS,
             range_test = f"{df.iloc[i_ca]['ValidTimeUtc']} -> {df.iloc[n-1]['ValidTimeUtc']}"
             test_months = int(df.iloc[i_ca:]["ValidTimeUtc"].dt.to_period("M").nunique())
             test_lo_hi = df.iloc[i_ca], df.iloc[n-1]
+            bs_val_df, bs_val_y = df.iloc[i_tr:i_va], yval
+            bs_test_df, bs_test_y = df.iloc[i_ca:], yte
 
         if first_train_X is None:
             first_train_X = Xtr
@@ -364,6 +400,11 @@ def train_location(location: str, models_root: Path, leads=T.LEADS,
         for tag, m in (("q_lo", m_lo), ("q_med", m_med), ("q_hi", m_hi)):
             m.booster_.save_model(str(out_dir / f"{tag}_lead_{lead}h.txt"))
 
+        # Best single NWP wsp MAE on the SAME slices — the Models card's
+        # Δ-vs-best-single baseline (see _best_single_nwp_wsp_mae).
+        bs_name, bs_test_mae = _best_single_nwp_wsp_mae(bs_test_df, bs_test_y)
+        _, bs_val_mae = _best_single_nwp_wsp_mae(bs_val_df, bs_val_y)
+
         per_lead[lead] = dict(
             n_train=n_train, n_val=n_val, n_calib=n_calib, n_test=n_test,
             q50_mae=q50_mae, conformal_q=Q, coverage=cover, width=width,
@@ -372,6 +413,7 @@ def train_location(location: str, models_root: Path, leads=T.LEADS,
             rf_q50_mae=rf_mae, rf_n_test=rf_n, rf_range=rf_range,
             oof_cover=oof_cover, holdout_cover=holdout_cover,
             k_folds=k_used, fold_iters=fold_iters,
+            best_single=bs_name, bs_val_mae=bs_val_mae, bs_test_mae=bs_test_mae,
         )
         print(f"lead {lead}h [{build}/{conformal}]: q50 MAE={q50_mae:.4f} m/s, Q={Q:+.4f}, "
               f"width={width:.3f} m/s, "
@@ -467,9 +509,15 @@ def _write_bundle(out_dir, location, version, per_lead, feature_names):
             "LeadHours": l, "TrainRows": c["n_train"], "ValRows": c["n_val"],
             "CalibRows": c.get("n_calib"), "TestRows": c["n_test"],
             "BuildMode": c.get("build"), "SplitDescription": c.get("split_desc"),
-            "BestSingle": "wind_speed_lgb_qmed",
+            # BestSingle* = the best single NWP's wsp MAE on the same val/test
+            # slices (Models card Δ baseline). Pre-2026-06-10 this stamped
+            # q50's own MAE → the card's Δ read 0% at every lead. Degenerate
+            # slice falls back to q50's MAE — never null/NaN (the .NET
+            # deserialiser rejects both).
+            "BestSingle": c.get("best_single") or "wind_speed_lgb_qmed",
             "BlendTestMae": c["q50_mae"], "BlendTestRmse": c["width"], "BlendTestBias": None,
-            "BestSingleValMae": c["q50_mae"], "BestSingleTestMae": c["q50_mae"],
+            "BestSingleValMae": _finite_or(c.get("bs_val_mae"), c["q50_mae"]),
+            "BestSingleTestMae": _finite_or(c.get("bs_test_mae"), c["q50_mae"]),
             "RequiredFilterTestMae": c.get("rf_q50_mae"),
             "RequiredFilterTestRows": c.get("rf_n_test"),
             "RequiredFilterTestRange": c.get("rf_range"),
