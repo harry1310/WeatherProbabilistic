@@ -18,11 +18,14 @@ Per lead:
 Bundle layout (mirrors train_4a/train_wind_mvn so the .NET Models page reads it):
   q_lo_lead_{L}h.txt / q_med_lead_{L}h.txt / q_hi_lead_{L}h.txt  (LightGBM boosters)
   feature_schema.json, calibration.json (per-lead Q + coverage), training_metadata.json
-Writes to data/models/wind/{location}/v{ts}_wind_speed_lgb/. Manifest promotion +
-R2 push are handled by the retrain-python workflow (same as 4a).
+Writes to data/models/wind/{location}/v{ts}_wind_speed_lgb/, runs the RetrainGuard
+(continuity from the latest .NET wind_speed_lgb bundle's training_summary.json),
+and promotes the version into models/wind/MANIFEST.json as CHALLENGER — the
+ERA5-truth .NET `wind` phase stays Current. R2 push happens in retrain-python.yml.
 """
 import argparse
 import json
+import logging
 import math
 import sys
 from datetime import datetime, timezone
@@ -31,11 +34,17 @@ from pathlib import Path
 import numpy as np
 import lightgbm as lgb
 
-sys.path.insert(0, "scripts")
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "scripts"))
 import train_wind_mvn as T  # noqa: E402  (build_features / load_dunkeswell / load_oro_static / time_split / LEADS / NWPS)
+from src.manifest_promote import promote_station_version  # noqa: E402
+from src.retrain_guard import build_check_and_save_versioned  # noqa: E402
 
 TARGET = "wind-speed-lgb"
 PHASE = "wind_speed_lgb"
+MODEL_DIR = "wind"             # manifest target tree (shared with the .NET `wind` champion)
+log = logging.getLogger("train_wind_speed_pi")
 COVERAGE = 0.90                # nominal band coverage
 ALPHA_LO, ALPHA_HI = 0.05, 0.95
 K_FOLDS = 10                   # cross-conformal fold count (contiguous chronological blocks)
@@ -186,6 +195,7 @@ def train_location(location: str, models_root: Path, leads=T.LEADS,
 
     feature_names = None
     per_lead = {}
+    first_train_X = None       # first trained lead's train matrix — feeds the retrain guard
     for lead in leads:
         df_raw = T.build_features(location, lead, dunk, oro)
         if df_raw.empty:
@@ -244,6 +254,9 @@ def train_location(location: str, models_root: Path, leads=T.LEADS,
             range_test = f"{df.iloc[i_ca]['ValidTimeUtc']} -> {df.iloc[n-1]['ValidTimeUtc']}"
             test_months = int(df.iloc[i_ca:]["ValidTimeUtc"].dt.to_period("M").nunique())
             test_lo_hi = df.iloc[i_ca], df.iloc[n-1]
+
+        if first_train_X is None:
+            first_train_X = Xtr
 
         # POINT (q_med): UNCHANGED in both conformal modes — 70/15/15 train slice,
         # L2+l1 early stopping. This is the gated .NET-comparable point estimator and
@@ -378,8 +391,41 @@ def train_location(location: str, models_root: Path, leads=T.LEADS,
         print("No leads trained — aborting.", flush=True)
         return 3
 
+    # RetrainGuard before sidecars + promote — same semantics as train_wind_mvn:
+    # a breach leaves the boosters on disk as an orphan version dir (never
+    # promoted, predict's find_latest_bundle skips it because the sidecars are
+    # missing) and exits 4 so the workflow files a [ci-fail] issue. The
+    # previous-summary lookup is phase-filtered via training_metadata.json, so
+    # continuity runs straight from the latest .NET wind_speed_lgb bundle.
+    guard = build_check_and_save_versioned(
+        log,
+        version_dir=out_dir,
+        composite=f"{MODEL_DIR}/{location}",
+        phase=PHASE,
+        version=version,
+        rows_train=sum(c["n_train"] for c in per_lead.values()),
+        rows_val=sum(c["n_val"] for c in per_lead.values()),
+        rows_test=sum(c["n_test"] for c in per_lead.values()),
+        train_features=first_train_X,
+        feature_names=feature_names,
+        label_rates={location: 1.0},   # regression — no label rate
+        location_name=location,
+    )
+    if not guard.passed:
+        print("Retrain guard FAIL — bundle not promoted.", flush=True)
+        return 4
+
     _write_bundle(out_dir, location, version, per_lead, feature_names)
     print(f"Wrote bundle → {out_dir}", flush=True)
+    promote_station_version(
+        models_root=models_root,
+        target=MODEL_DIR,
+        station_slug=location,
+        version=version,
+        phase_tag=PHASE,
+        role="challenger",   # the ERA5-truth .NET `wind` phase stays Current
+    )
+    print(f"Promoted {version} into {MODEL_DIR}/MANIFEST.json under station={location}", flush=True)
     return 0
 
 
@@ -415,7 +461,8 @@ def _write_bundle(out_dir, location, version, per_lead, feature_names):
         "TrainedAtUtc": datetime.now(timezone.utc).isoformat(),
         "Hyperparameters": {"library": f"lightgbm=={lgb.__version__}",
                             "objective": "quantile", "quantiles": [ALPHA_LO, 0.5, ALPHA_HI],
-                            "conformal": "split-CQR", **{k: v for k, v in LGB_PARAMS.items()}},
+                            "conformal": ("cross-conformal CQR" if any_cc else "split-CQR"),
+                            **{k: v for k, v in LGB_PARAMS.items()}},
         "PerLead": {str(l): {
             "LeadHours": l, "TrainRows": c["n_train"], "ValRows": c["n_val"],
             "CalibRows": c.get("n_calib"), "TestRows": c["n_test"],
@@ -450,6 +497,7 @@ def main():
                          "crossconf: K-fold cross-conformal Q on pooled out-of-fold "
                          "scores (required build only). Default: split.")
     args = ap.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     sys.exit(train_location(args.location, Path(args.models_root),
                             build=args.build, conformal=args.conformal))
 

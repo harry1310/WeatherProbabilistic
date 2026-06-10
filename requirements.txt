@@ -54,7 +54,15 @@ ngboost==0.5.10
 # matches local dev (verified 2.12.0+cpu) and CI's default torch wheel
 # resolution under Linux without NVIDIA indices.
 torch>=2.10,<3.0
-# Bake-off-only deps (lightgbm, pymc-bart) live in requirements-bakeoff.txt
+# wind_speed_lgb (Option B cutover 2026-06-10) — quantile-LGB + cross-
+# conformal CQR train + predict (train_wind_speed_pi / predict_wind_speed_pi).
+# Promoted from requirements-bakeoff.txt when the wind-speed model moved
+# .NET→Python. Boosters round-trip via LightGBM's own text format
+# (save_model/Booster(model_file=...)), which is stable across minors;
+# cap <5.0 so a major rewrite can't silently change predict behaviour
+# (the bundle stamps the exact trained version in training_metadata.json).
+lightgbm>=4.6,<5.0
+# Bake-off-only deps (pymc-bart) live in requirements-bakeoff.txt
 # so production CI doesn't install them. predict_4a imports its shared
 # helpers from scripts/_shared.py rather than transitively pulling in the
 # bake-off module.

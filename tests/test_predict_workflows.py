@@ -18,11 +18,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 WF_DIR = REPO_ROOT / ".github" / "workflows"
 SHARED_PY = REPO_ROOT / "scripts" / "_shared.py"
 
-# Every predict workflow -> the phase id it must hand sync_train_data.sh.
+# Every predict workflow -> the phase csv it must hand sync_train_data.sh.
 PREDICT_WORKFLOWS = {
     "predict-4a.yml": "4a",
     "predict-3f.yml": "3f",
-    "predict-wind-direction.yml": "wind_mvn",
+    # Both Python wind models predict from this one workflow (shared pull).
+    "predict-wind-direction.yml": "wind_mvn,wind_speed_lgb",
 }
 
 

@@ -229,7 +229,7 @@ jobs:
           done
 
           # run_<id> = requested AND admitted by this matrix location.
-          run_4a=false; run_3f=false; run_wind_mvn=false
+          run_4a=false; run_3f=false; run_wind_mvn=false; run_wind_speed_lgb=false
           for row in "${PHASE_ROWS[@]}"; do
             id="${row%%|*}"
             locs="${row#*|}"
@@ -246,6 +246,7 @@ jobs:
                 4a) run_4a=true ;;
                 3f) run_3f=true ;;
                 wind_mvn) run_wind_mvn=true ;;
+                wind_speed_lgb) run_wind_speed_lgb=true ;;
                 *) echo "::warning::phases.yaml impl=python phase '$id' has no Train step wired in retrain-python.yml — add run_${id} + a Train step." ;;
               esac
             fi
@@ -253,19 +254,21 @@ jobs:
           echo "run_4a=$run_4a" >> "$GITHUB_OUTPUT"
           echo "run_3f=$run_3f" >> "$GITHUB_OUTPUT"
           echo "run_wind_mvn=$run_wind_mvn" >> "$GITHUB_OUTPUT"
-          echo "Resolved: run_4a=$run_4a run_3f=$run_3f run_wind_mvn=$run_wind_mvn"
+          echo "run_wind_speed_lgb=$run_wind_speed_lgb" >> "$GITHUB_OUTPUT"
+          echo "Resolved: run_4a=$run_4a run_3f=$run_3f run_wind_mvn=$run_wind_mvn run_wind_speed_lgb=$run_wind_speed_lgb"
 
           # CSV of resolved phases — consumed by scripts/sync_train_data.sh
           # so the per-phase pull declarations are the same source of truth
           # the smoke tests use. Empty = no pulls + train steps all skip.
           RESOLVED_CSV=""
-          [ "$run_4a"       = "true" ] && RESOLVED_CSV="${RESOLVED_CSV:+$RESOLVED_CSV,}4a"
-          [ "$run_3f"       = "true" ] && RESOLVED_CSV="${RESOLVED_CSV:+$RESOLVED_CSV,}3f"
-          [ "$run_wind_mvn" = "true" ] && RESOLVED_CSV="${RESOLVED_CSV:+$RESOLVED_CSV,}wind_mvn"
+          [ "$run_4a"             = "true" ] && RESOLVED_CSV="${RESOLVED_CSV:+$RESOLVED_CSV,}4a"
+          [ "$run_3f"             = "true" ] && RESOLVED_CSV="${RESOLVED_CSV:+$RESOLVED_CSV,}3f"
+          [ "$run_wind_mvn"       = "true" ] && RESOLVED_CSV="${RESOLVED_CSV:+$RESOLVED_CSV,}wind_mvn"
+          [ "$run_wind_speed_lgb" = "true" ] && RESOLVED_CSV="${RESOLVED_CSV:+$RESOLVED_CSV,}wind_speed_lgb"
           echo "phases_resolved_csv=$RESOLVED_CSV" >> "$GITHUB_OUTPUT"
           echo "phases_resolved_csv='$RESOLVED_CSV'"
 
-          if [ "$run_4a" = "false" ] && [ "$run_3f" = "false" ] && [ "$run_wind_mvn" = "false" ]; then
+          if [ -z "$RESOLVED_CSV" ]; then
             echo "::notice::No python phases run for location '$MATRIX_LOCATION' — this matrix job is a no-op (heavy install + train steps all skip)."
           fi
 
@@ -387,6 +390,25 @@ jobs:
         run: |
           python -u scripts/train_wind_mvn.py --location ${{ matrix.location }}
 
+      - name: Train wind_speed_lgb (quantile-LGB + cross-conformal CQR)
+        # 1 location × 3 leads, each = 3 quantile heads + K=10 cross-conformal
+        # folds × 2 sides. Total wall ~5-10 min. The Python port of the .NET
+        # WindSpeedLgbBlender (Option B cutover 2026-06-10): one model owns
+        # the q50 point AND the calibrated 90% band. --conformal crossconf is
+        # the finalized production mode (pooled-OOF coverage 90%, walk-forward
+        # production-regime coverage ~88-89%); --build required is the default.
+        # Bonehill-only via phases.yaml's locations: filter, same as wind_mvn.
+        id: train_wind_speed_lgb
+        if: steps.gate.outputs.proceed == 'true' && steps.phases.outputs.run_wind_speed_lgb == 'true'
+        # continue-on-error so a wind_speed_lgb failure doesn't strand the
+        # other phases' bundles (and vice versa).
+        continue-on-error: true
+        env:
+          WEATHERBLEND_DATA_ROOT: ${{ github.workspace }}/../WeatherBlend/data
+          WB_LOCATION: ${{ matrix.location }}
+        run: |
+          python -u scripts/train_wind_speed_pi.py --location ${{ matrix.location }} --conformal crossconf
+
       # ----- R2 auto-push ------------------------------------------------
       # R2 sync is incremental, gated on each train step's success (the
       # guard exited 4 if data drifted, in which case write_bundle never
@@ -438,6 +460,22 @@ jobs:
             --fast-list --transfers 16 --checkers 32 --s3-no-check-bucket \
             --include "**/*wind_mvn*/**"
 
+      - name: Push wind_speed_lgb bundles to R2
+        # train_wind_speed_pi.py writes per-lead q_lo/q_med/q_hi LightGBM
+        # boosters + feature_schema + calibration + training_metadata +
+        # training_summary under
+        # ../WeatherBlend/data/models/wind/{location}/v..._wind_speed_lgb/.
+        # The wind/ target tree already exists on R2 (the .NET-era bundles
+        # live there) but keep --s3-no-check-bucket like every other push.
+        if: steps.phases.outputs.run_wind_speed_lgb == 'true' && steps.train_wind_speed_lgb.outcome == 'success'
+        env:
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          rclone copy ../WeatherBlend/data/models/wind \
+            "r2:${R2_BUCKET}/data/models/wind" \
+            --fast-list --transfers 16 --checkers 32 --s3-no-check-bucket \
+            --include "**/*wind_speed_lgb*/**"
+
       - name: Push MANIFEST.json to R2
         # train_4a.py + train_3f.py + train_wind_mvn.py all promote the
         # freshly-trained version into the local MANIFEST.json's Active
@@ -448,7 +486,7 @@ jobs:
         # target's root) wouldn't be picked up by either. This step does
         # the explicit manifest push for each target tree any phase
         # promoted into.
-        if: (steps.phases.outputs.run_4a == 'true' && steps.train_4a.outcome == 'success') || (steps.phases.outputs.run_3f == 'true' && steps.train_3f.outcome == 'success') || (steps.phases.outputs.run_wind_mvn == 'true' && steps.train_wind_mvn.outcome == 'success')
+        if: (steps.phases.outputs.run_4a == 'true' && steps.train_4a.outcome == 'success') || (steps.phases.outputs.run_3f == 'true' && steps.train_3f.outcome == 'success') || (steps.phases.outputs.run_wind_mvn == 'true' && steps.train_wind_mvn.outcome == 'success') || (steps.phases.outputs.run_wind_speed_lgb == 'true' && steps.train_wind_speed_lgb.outcome == 'success')
         env:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
@@ -472,6 +510,12 @@ jobs:
               --s3-no-check-bucket
             echo "Pushed wind_direction/MANIFEST.json to R2."
           fi
+          if [ -f ../WeatherBlend/data/models/wind/MANIFEST.json ]; then
+            rclone copyto ../WeatherBlend/data/models/wind/MANIFEST.json \
+              "r2:${R2_BUCKET}/data/models/wind/MANIFEST.json" \
+              --s3-no-check-bucket
+            echo "Pushed wind/MANIFEST.json to R2."
+          fi
 
       - name: Aggregate retrain results
         # The train steps are continue-on-error so the push steps can
@@ -484,6 +528,7 @@ jobs:
           if [ "${{ steps.train_4a.outcome }}" = "failure" ]; then failed+=("4a"); fi
           if [ "${{ steps.train_3f.outcome }}" = "failure" ]; then failed+=("3f"); fi
           if [ "${{ steps.train_wind_mvn.outcome }}" = "failure" ]; then failed+=("wind_mvn"); fi
+          if [ "${{ steps.train_wind_speed_lgb.outcome }}" = "failure" ]; then failed+=("wind_speed_lgb"); fi
           if [ ${#failed[@]} -gt 0 ]; then
             echo "::error::Retrain failed for phase(s): ${failed[*]}. Passing phases were still pushed to R2 — inspect each failed phase's log above."
             exit 1

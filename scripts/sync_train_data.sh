@@ -4,9 +4,10 @@
 #
 # Sibling of WeatherBlend's scripts/sync_train_data.sh — same contract,
 # scoped to the python (impl=python) train phases this repo owns:
-#   - 4a       per-cell BART precipitation
-#   - 3f       NGBoost-LogNormal rainfall amount
-#   - wind_mvn PyTorch bivariate-normal wind direction
+#   - 4a             per-cell BART precipitation
+#   - 3f             NGBoost-LogNormal rainfall amount
+#   - wind_mvn       PyTorch bivariate-normal wind direction
+#   - wind_speed_lgb quantile-LGB + cross-conformal CQR wind speed
 #
 # Single source of truth for "which data trees does each python phase
 # consume?". Called by:
@@ -85,11 +86,13 @@ need_orographic=0
 need_precip_manifest=0
 need_rainfall_amount_manifest=0
 need_wind_direction_manifest=0
+need_wind_manifest=0
 # Predict-mode: name the model-bundle tree (target) + phase-version glob to
 # pull the latest bundle per cell for. Empty = no bundle pull.
 bundle_precipitation=""
 bundle_rainfall_amount=""
 bundle_wind_direction=""
+bundle_wind=""
 
 IFS=',' read -ra phases <<< "$phases_csv"
 for p in "${phases[@]}"; do
@@ -134,6 +137,18 @@ for p in "${phases[@]}"; do
       need_forecasts=1; need_orographic=1
       if [ "$MODE" = "train" ]; then need_midas=1; need_wind_direction_manifest=1
       else bundle_wind_direction="wind_mvn"; fi ;;
+
+    # wind_speed_lgb (quantile-LGB + cross-conformal CQR, the Python port of
+    # the .NET WindSpeedLgbBlender — Option B cutover 2026-06-10). Same
+    # feature recipe as wind_mvn (train_wind_mvn.build_features): forecasts +
+    # static orographic at BOTH modes. Train: Dunkeswell MIDAS truth (label)
+    # + the wind MANIFEST (train promotes as challenger into the EXISTING
+    # Active list, alongside the .NET-trained `wind` champion entries).
+    # Predict: the latest *_wind_speed_lgb bundle under models/wind/{loc}.
+    wind_speed_lgb)
+      need_forecasts=1; need_orographic=1
+      if [ "$MODE" = "train" ]; then need_midas=1; need_wind_manifest=1
+      else bundle_wind="wind_speed_lgb"; fi ;;
 
     *)
       echo "::error::sync_train_data: unknown python phase '$p' — add it to scripts/sync_train_data.sh."
@@ -221,6 +236,9 @@ fi
 if [ "$need_wind_direction_manifest" -gt 0 ]; then
   copyto_manifest "wind_direction"
 fi
+if [ "$need_wind_manifest" -gt 0 ]; then
+  copyto_manifest "wind"
+fi
 
 # Predict-mode model bundles. Pull the LATEST bundle matching the phase-version
 # glob per cell (station or location) under models/<target>/. Mirrors the
@@ -248,8 +266,9 @@ pull_latest_bundle() {
 [ -n "$bundle_precipitation" ]    && pull_latest_bundle "precipitation"    "$bundle_precipitation"
 [ -n "$bundle_rainfall_amount" ]  && pull_latest_bundle "rainfall_amount"  "$bundle_rainfall_amount"
 [ -n "$bundle_wind_direction" ]   && pull_latest_bundle "wind_direction"   "$bundle_wind_direction"
+[ -n "$bundle_wind" ]             && pull_latest_bundle "wind"             "$bundle_wind"
 
 echo "sync_train_data: done (mode=$MODE)."
 echo "  forecasts=$need_forecasts rainfall=$need_rainfall midas=$need_midas orographic=$need_orographic"
-echo "  manifests: precip=$need_precip_manifest rainfall_amount=$need_rainfall_amount_manifest wind_direction=$need_wind_direction_manifest"
-echo "  bundles: precip='$bundle_precipitation' rainfall_amount='$bundle_rainfall_amount' wind_direction='$bundle_wind_direction'"
+echo "  manifests: precip=$need_precip_manifest rainfall_amount=$need_rainfall_amount_manifest wind_direction=$need_wind_direction_manifest wind=$need_wind_manifest"
+echo "  bundles: precip='$bundle_precipitation' rainfall_amount='$bundle_rainfall_amount' wind_direction='$bundle_wind_direction' wind='$bundle_wind'"

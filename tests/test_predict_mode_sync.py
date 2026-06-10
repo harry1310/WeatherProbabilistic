@@ -87,3 +87,46 @@ def test_predict_mode_wind_mvn_pulls_bundle_and_orographic(tmp_path):
     assert any(s.startswith("static/orographic/") for s in f), f
     assert any(s.startswith("forecasts/") for s in f), f
     assert not any(s.startswith("truth/midas/") for s in f), f  # MIDAS is train-only label
+
+
+def test_predict_mode_wind_speed_lgb_pulls_latest_lgb_bundle_only(tmp_path):
+    """wind_speed_lgb predict (the predict-wind-direction.yml csv) pulls the
+    LATEST *_wind_speed_lgb bundle from the shared models/wind tree, skipping
+    both an older lgb bundle and the .NET champion `wind` bundles (plain
+    v{ts}, no suffix) that live in the same per-location dir — plus the
+    MIDAS-is-train-only + no-MANIFEST predict contracts."""
+    root = tmp_path / "r2"; d = root / "data"
+    _touch(d / "forecasts/location=bonehill_rocks/model=gfs_seamless/date=2026-01-01/run=00.parquet")
+    _touch(d / "static/orographic/bonehill_rocks.json")
+    _touch(d / "models/wind/bonehill_rocks/v2026-05-01_120000_wind_speed_lgb/q_med_lead_24h.txt")
+    _touch(d / "models/wind/bonehill_rocks/v2026-06-01_120000_wind_speed_lgb/q_med_lead_24h.txt")  # newest lgb
+    _touch(d / "models/wind/bonehill_rocks/v2026-06-05_120000/lead_24h.zip")  # .NET champion `wind` — not ours
+    _touch(d / "models/wind/MANIFEST.json")
+    _touch(d / "truth/midas/raw/midas-open_x_01383_y.csv")
+    dest = tmp_path / "dest"
+    run_sync_train_data(location="bonehill_rocks", phases="wind_mvn,wind_speed_lgb",
+                        r2_source=root, local_root=dest, mode="predict")
+    f = _files(dest)
+    assert any("v2026-06-01_120000_wind_speed_lgb/q_med_lead_24h.txt" in s for s in f), f
+    assert not any("v2026-05-01_120000_wind_speed_lgb" in s for s in f), f
+    assert not any("v2026-06-05_120000/" in s for s in f), f
+    assert not any(s.endswith("models/wind/MANIFEST.json") for s in f), f
+    assert not any(s.startswith("truth/midas/") for s in f), f
+
+
+def test_train_mode_wind_speed_lgb_pulls_wind_manifest_and_midas(tmp_path):
+    """Train-mode inverse: wind_speed_lgb pulls the wind MANIFEST (promote
+    target) + MIDAS truth, and no model bundle (train mints fresh)."""
+    root = tmp_path / "r2"; d = root / "data"
+    _touch(d / "forecasts/location=bonehill_rocks/model=gfs_seamless/date=2026-01-01/run=00.parquet")
+    _touch(d / "static/orographic/bonehill_rocks.json")
+    _touch(d / "models/wind/bonehill_rocks/v2026-06-01_120000_wind_speed_lgb/q_med_lead_24h.txt")
+    _touch(d / "models/wind/MANIFEST.json")
+    _touch(d / "truth/midas/raw/midas-open_x_01383_y.csv")
+    dest = tmp_path / "dest"
+    run_sync_train_data(location="bonehill_rocks", phases="wind_speed_lgb",
+                        r2_source=root, local_root=dest, mode="train")
+    f = _files(dest)
+    assert any(s.endswith("models/wind/MANIFEST.json") for s in f), f
+    assert any(s.startswith("truth/midas/") for s in f), f
+    assert not any("_wind_speed_lgb/q_med_lead_24h.txt" in s for s in f), f
