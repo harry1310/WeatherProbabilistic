@@ -1,0 +1,4 @@
+lead,variant,station,n_test,brier,bss,clim_brier,n_pooled_train,n_feats_eff,wall_s
+24,rich-pooled-terrain-v3,ea_dartmoor_nr_hexworthy,3060,0.1372,0.4235,0.238,14277,71,184.4
+48,rich-pooled-terrain-v3,ea_dartmoor_nr_hexworthy,3057,0.1507,0.3674,0.2382,14260,71,179.7
+72,rich-pooled-terrain-v3,ea_dartmoor_nr_hexworthy,3053,0.1641,0.3107,0.238,14243,71,182.7

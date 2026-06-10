@@ -1,0 +1,26 @@
+4a-oro bake-off summary
+=======================
+
+NTREE=500 K=3.0 NSKIP=200 NDPOST=1000 SEED=42
+Stations: ['ea_bellever_dartmoor', 'ea_dartmoor_nr_hexworthy', 'ea_bovey_tracey']
+Leads:    [24, 48, 72, 96, 120]
+
+Negative delta = oro / extra data wins.
+
+--- Within scope: 2024plus (oro_dyn vs baseline) ---
+variant                        baseline  oro_dyn   delta  delta_pct
+station                  lead                                      
+ea_bellever_dartmoor     24      0.1168   0.1177  0.0009   0.770548
+ea_bovey_tracey          24      0.0908   0.0901 -0.0007  -0.770925
+ea_dartmoor_nr_hexworthy 24      0.1388   0.1390  0.0002   0.144092
+
+  Aggregate Δ Brier (2024plus): +0.0001 (+0.05%)
+
+--- Within scope: alldata (oro_dyn vs baseline) ---
+  (no rows)
+
+--- Cross-scope baseline (alldata vs 2024+, aligned to 2024+ test rows) ---
+                 station  lead  baseline_2024plus_brier  n_test_2024plus
+    ea_bellever_dartmoor    24                   0.1168             3059
+         ea_bovey_tracey    24                   0.0908             2953
+ea_dartmoor_nr_hexworthy    24                   0.1388             3060

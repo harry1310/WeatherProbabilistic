@@ -1,0 +1,4 @@
+lead,variant,station,n_test,brier,bss,clim_brier,n_pooled_train,n_feats_eff,wall_s
+24,rich-pooled-terrain-dynlee,ea_bovey_tracey,2953,0.087,0.4887,0.1702,13778,66,173.5
+48,rich-pooled-terrain-dynlee,ea_bovey_tracey,2950,0.1036,0.3914,0.1703,13761,66,175.3
+72,rich-pooled-terrain-dynlee,ea_bovey_tracey,2946,0.11,0.3539,0.1703,13744,66,172.5

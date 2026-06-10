@@ -1,0 +1,20 @@
+Step 2 pooled-with-terrain BART bake-off — raw per-cell Brier
+=============================================================
+
+NTREE=500 K=3.0 NSKIP=200 NDPOST=1000 SEED=42
+Stations: ['ea_bellever_dartmoor', 'ea_dartmoor_nr_hexworthy', 'ea_bovey_tracey', 'ea_princetown']
+Leads:    [24]
+Variants: ['lean-pooled-terrain']
+
+ lead             variant                  station  n_test  brier    bss  clim_brier  n_pooled_train  n_feats_eff  wall_s
+   24 lean-pooled-terrain     ea_bellever_dartmoor    3059 0.1209 0.4595      0.2236           56598           31  1299.1
+   24 lean-pooled-terrain ea_dartmoor_nr_hexworthy    3060 0.1442 0.4161      0.2469           56598           31  1299.1
+   24 lean-pooled-terrain          ea_bovey_tracey    2953 0.0900 0.4618      0.1672           56598           31  1299.1
+   24 lean-pooled-terrain            ea_princetown    3059 0.1235 0.4242      0.2146           56598           31  1299.1
+
+--- Aggregate (mean Brier across 4 stations) ---
+ lead             variant  brier_mean_4stns
+   24 lean-pooled-terrain           0.11965
+
+For the apples-to-apples comparison vs production 4a + Princetown
+per-cell baseline, run scripts/build_step2_comparison.py (TBD).

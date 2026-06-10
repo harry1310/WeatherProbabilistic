@@ -1,0 +1,7 @@
+station,lead,scope,variant,n_train,n_test,n_test_2024plus,n_feats_eff,brier,bss,brier_aligned_2024plus,clim_brier,wall_s
+ea_bellever_dartmoor,24,2024plus,baseline,14271,3059,3059,22,0.1168,0.4707,0.1168,0.2206,202.4
+ea_bellever_dartmoor,24,2024plus,oro_dyn,14271,3059,3059,27,0.1177,0.4666,0.1177,0.2206,207.8
+ea_dartmoor_nr_hexworthy,24,2024plus,baseline,14277,3060,3060,22,0.1388,0.4168,0.1388,0.238,198.5
+ea_dartmoor_nr_hexworthy,24,2024plus,oro_dyn,14277,3060,3060,27,0.139,0.4162,0.139,0.238,203.9
+ea_bovey_tracey,24,2024plus,baseline,13778,2953,2953,22,0.0908,0.4665,0.0908,0.1702,198.0
+ea_bovey_tracey,24,2024plus,oro_dyn,13778,2953,2953,27,0.0901,0.4707,0.0901,0.1702,200.7

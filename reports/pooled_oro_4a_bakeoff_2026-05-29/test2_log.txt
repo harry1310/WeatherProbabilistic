@@ -1,0 +1,72 @@
+
+[23:36:09] === Lead 24h ===
+  ea_bellever_dartmoor: train=14271 val=3058 test=3059
+  ea_dartmoor_nr_hexworthy: train=14277 val=3059 test=3060
+  ea_bovey_tracey: train=13778 val=2952 test=2953
+  ea_princetown: train=14272 val=3058 test=3059
+  pooled fit done (best_iter=17)
+    pooled ea_bellever_dartmoor: Brier 0.1140
+    pooled ea_dartmoor_nr_hexworthy: Brier 0.1372
+    pooled ea_bovey_tracey: Brier 0.0871
+    pooled ea_princetown: Brier 0.1165
+    per-station ea_bellever_dartmoor: Brier 0.1182 (best_iter=13)
+    per-station ea_dartmoor_nr_hexworthy: Brier 0.1396 (best_iter=19)
+    per-station ea_bovey_tracey: Brier 0.0897 (best_iter=19)
+    per-station ea_princetown: Brier 0.1185 (best_iter=15)
+
+[23:36:13] === Lead 48h ===
+  ea_bellever_dartmoor: train=14254 val=3054 test=3056
+  ea_dartmoor_nr_hexworthy: train=14260 val=3055 test=3057
+  ea_bovey_tracey: train=13761 val=2948 test=2950
+  ea_princetown: train=14255 val=3054 test=3056
+  pooled fit done (best_iter=18)
+    pooled ea_bellever_dartmoor: Brier 0.1336
+    pooled ea_dartmoor_nr_hexworthy: Brier 0.1574
+    pooled ea_bovey_tracey: Brier 0.1040
+    pooled ea_princetown: Brier 0.1383
+    per-station ea_bellever_dartmoor: Brier 0.1352 (best_iter=13)
+    per-station ea_dartmoor_nr_hexworthy: Brier 0.1543 (best_iter=16)
+    per-station ea_bovey_tracey: Brier 0.1065 (best_iter=18)
+    per-station ea_princetown: Brier 0.1355 (best_iter=17)
+
+[23:36:16] === Lead 72h ===
+  ea_bellever_dartmoor: train=14238 val=3051 test=3051
+  ea_dartmoor_nr_hexworthy: train=14243 val=3052 test=3053
+  ea_bovey_tracey: train=13744 val=2945 test=2946
+  ea_princetown: train=14238 val=3051 test=3052
+  pooled fit done (best_iter=18)
+    pooled ea_bellever_dartmoor: Brier 0.1438
+    pooled ea_dartmoor_nr_hexworthy: Brier 0.1667
+    pooled ea_bovey_tracey: Brier 0.1135
+    pooled ea_princetown: Brier 0.1473
+    per-station ea_bellever_dartmoor: Brier 0.1509 (best_iter=20)
+    per-station ea_dartmoor_nr_hexworthy: Brier 0.1651 (best_iter=12)
+    per-station ea_bovey_tracey: Brier 0.1145 (best_iter=16)
+    per-station ea_princetown: Brier 0.1473 (best_iter=13)
+
+Wrote C:\Projects\Weather\WeatherProbabilistic\reports\pooled_oro_4a_bakeoff_2026-05-29\test2_3o_per_station_vs_pooled.csv
+
+Per-cell pooled vs per-station:
+                 station  lead  per-station  pooled  delta_brier  delta_pct
+    ea_bellever_dartmoor    24       0.1182  0.1140       0.0042       3.68
+    ea_bellever_dartmoor    48       0.1352  0.1336       0.0016       1.20
+    ea_bellever_dartmoor    72       0.1509  0.1438       0.0071       4.94
+         ea_bovey_tracey    24       0.0897  0.0871       0.0026       2.99
+         ea_bovey_tracey    48       0.1065  0.1040       0.0025       2.40
+         ea_bovey_tracey    72       0.1145  0.1135       0.0010       0.88
+ea_dartmoor_nr_hexworthy    24       0.1396  0.1372       0.0024       1.75
+ea_dartmoor_nr_hexworthy    48       0.1543  0.1574      -0.0031      -1.97
+ea_dartmoor_nr_hexworthy    72       0.1651  0.1667      -0.0016      -0.96
+           ea_princetown    24       0.1185  0.1165       0.0020       1.72
+           ea_princetown    48       0.1355  0.1383      -0.0028      -2.02
+           ea_princetown    72       0.1473  0.1473       0.0000       0.00
+
+Aggregate per lead (mean across 4 stations):
+ lead  mean_pooled  mean_per_station  mean_delta_pct
+   24       0.1137            0.1165          2.5350
+   48       0.1333            0.1329         -0.0975
+   72       0.1428            0.1444          1.2150
+
+Overall (mean across all stations × leads):
+ mean_pooled  mean_per_station  mean_delta_pct
+        0.13            0.1313          1.2175

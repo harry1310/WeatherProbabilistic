@@ -1,0 +1,10 @@
+station,lead,variant,n_aligned,brier_baseline,brier_pooled,delta_brier,delta_pct
+ea_bellever_dartmoor,24,lean-pooled-terrain,3025,0.1156,0.1192,0.0035,3.05
+ea_bellever_dartmoor,48,lean-pooled-terrain,3022,0.1282,0.1331,0.0049,3.82
+ea_bellever_dartmoor,72,lean-pooled-terrain,3017,0.1404,0.1548,0.0143,10.21
+ea_bovey_tracey,24,lean-pooled-terrain,2592,0.1065,0.0978,-0.0087,-8.16
+ea_bovey_tracey,48,lean-pooled-terrain,2589,0.1179,0.1171,-0.0008,-0.71
+ea_bovey_tracey,72,lean-pooled-terrain,2585,0.1286,0.136,0.0074,5.73
+ea_dartmoor_nr_hexworthy,24,lean-pooled-terrain,2699,0.151,0.1425,-0.0085,-5.65
+ea_dartmoor_nr_hexworthy,48,lean-pooled-terrain,2696,0.1628,0.1567,-0.0061,-3.78
+ea_dartmoor_nr_hexworthy,72,lean-pooled-terrain,2692,0.1749,0.1798,0.0049,2.8

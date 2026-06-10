@@ -1,0 +1,4 @@
+lead,variant,station,n_test,brier,bss,clim_brier,n_pooled_train,n_feats_eff,wall_s
+24,rich-pooled-terrain,ea_princetown,3059,0.1182,0.4466,0.2136,14272,65,187.9
+48,rich-pooled-terrain,ea_princetown,3056,0.1321,0.3819,0.2137,14255,65,194.1
+72,rich-pooled-terrain,ea_princetown,3052,0.1473,0.3118,0.214,14238,65,183.6

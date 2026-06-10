@@ -1,0 +1,4 @@
+lead,variant,station,n_test,brier,bss,clim_brier,n_pooled_train,n_feats_eff,wall_s
+24,rich-pooled-terrain-dynlee,ea_dartmoor_nr_hexworthy,3060,0.1368,0.4254,0.238,14277,66,191.1
+48,rich-pooled-terrain-dynlee,ea_dartmoor_nr_hexworthy,3057,0.1506,0.3677,0.2382,14260,66,192.8
+72,rich-pooled-terrain-dynlee,ea_dartmoor_nr_hexworthy,3053,0.1632,0.3142,0.238,14243,66,196.3
