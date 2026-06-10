@@ -90,7 +90,7 @@ def test_predict_mode_wind_mvn_pulls_bundle_and_orographic(tmp_path):
 
 
 def test_predict_mode_wind_speed_lgb_pulls_latest_lgb_bundle_only(tmp_path):
-    """wind_speed_lgb predict (the predict-wind-direction.yml csv) pulls the
+    """wind_speed_lgb predict (the predict-wind.yml csv) pulls the
     LATEST *_wind_speed_lgb bundle from the shared models/wind tree, skipping
     both an older lgb bundle and the .NET champion `wind` bundles (plain
     v{ts}, no suffix) that live in the same per-location dir — plus the

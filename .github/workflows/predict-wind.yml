@@ -1,4 +1,4 @@
-name: predict-wind-direction
+name: predict-wind
 
 env:
   RCLONE_TIMEOUT: 5m
@@ -9,6 +9,8 @@ env:
 # Phase 2 wind_mvn PREDICT (direction) + wind_speed_lgb PREDICT (speed
 # point + CQR band) — both Python wind models share this job: same
 # forecast pull, same orographic JSON, same ~30s dep install.
+# (Renamed from predict-wind-direction 2026-06-10 — it has covered speed
+# as well as direction since the wind_speed_lgb Option B cutover.)
 #
 # Cloudflare scheduler-worker chain (extended Hop C dispatches BOTH
 # predict-4a AND this workflow in parallel via Promise.allSettled, both
@@ -39,7 +41,7 @@ env:
 #
 # Failure path: same /github-webhook handler in the Cloudflare
 # scheduler-worker that watches predict-4a opens a
-# `[ci-fail] predict-wind-direction` issue under `ci-failure` on a
+# `[ci-fail] predict-wind` issue under `ci-failure` on a
 # failed run.
 
 on:
@@ -57,11 +59,11 @@ on:
 concurrency:
   # Independent R2 prefix (wind_direction/) — separate lock from
   # predict-4a (precipitation/) and predict-3f (rainfall_amount/).
-  group: weatherprobabilistic-wind-direction
+  group: weatherprobabilistic-wind
   cancel-in-progress: false
 
 jobs:
-  predict-wind-direction:
+  predict-wind:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -213,7 +215,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: predict-wind-direction-${{ github.run_id }}
+          name: predict-wind-${{ github.run_id }}
           path: |
             *.log
             reports/

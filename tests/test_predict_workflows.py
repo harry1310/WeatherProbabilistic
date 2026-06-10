@@ -23,7 +23,8 @@ PREDICT_WORKFLOWS = {
     "predict-4a.yml": "4a",
     "predict-3f.yml": "3f",
     # Both Python wind models predict from this one workflow (shared pull).
-    "predict-wind-direction.yml": "wind_mvn,wind_speed_lgb",
+    # Renamed from predict-wind-direction 2026-06-10 (it does speed too).
+    "predict-wind.yml": "wind_mvn,wind_speed_lgb",
 }
 
 
@@ -75,7 +76,7 @@ def test_wind_speed_lgb_push_include_is_rooted():
     model_version= dirs at the COPY ROOT — the unrooted include matched
     nothing and the banded predictions silently never reached R2
     (Transferred 0 B / Checks 0/0). Pin the rooted form."""
-    text = (WF_DIR / "predict-wind-direction.yml").read_text(encoding="utf-8")
+    text = (WF_DIR / "predict-wind.yml").read_text(encoding="utf-8")
     assert "--include '/model_version=*wind_speed_lgb*/**'" in text, (
         "the wind_speed_lgb push include must be ROOTED ('/model_version=…') — "
         "an unrooted '**/model_version=…' silently pushes nothing from a tree "
