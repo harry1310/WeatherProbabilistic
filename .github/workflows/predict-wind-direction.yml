@@ -100,41 +100,21 @@ jobs:
           mkdir -p ./config
           rclone copy "r2:${R2_BUCKET}/config/config.yaml" ./config/ --checkers 4
 
-      - name: Pull live forecast tree + wind_mvn bundle + static orography
+      - name: Pull predict data (sync_train_data.sh MODE=predict)
+        # Single source of truth: forecasts + static orographic + the latest
+        # wind_mvn bundle, declared once in scripts/sync_train_data.sh (shared
+        # with train + smoke). MODE=predict skips MIDAS truth (the train-only
+        # label) + the promote MANIFEST. The script pulls the full NWP union
+        # (vs the old 6-model list) — harmless, predict_wind_mvn filters to
+        # PROD_WIND_NWPS at feature-build (over-pull cheap, under-pull drops
+        # columns).
         env:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
           LOC="${{ github.event.inputs.location }}"
           [ -z "$LOC" ] && LOC="bonehill_rocks"
-
-          # 6 production NWPs only — MF / AIFS excluded (no relevant data
-          # for wind_mvn). Mirrors PROD_WIND_NWPS in predict_wind_mvn.py.
-          mkdir -p "../WeatherBlend/data/forecasts/location=$LOC"
-          for m in gfs_seamless ecmwf_ifs025 icon_seamless gem_seamless ukmo_seamless jma_seamless; do
-            rclone copy "r2:${R2_BUCKET}/data/forecasts/location=$LOC/model=$m" \
-              "../WeatherBlend/data/forecasts/location=$LOC/model=$m" \
-              --fast-list --transfers 16 --checkers 32
-          done
-
-          # Latest *_wind_mvn bundle. Lexicographic max of wind_mvn-tagged
-          # version dirs.
-          mkdir -p "../WeatherBlend/data/models/wind_direction/$LOC"
-          latest=$(rclone lsf "r2:${R2_BUCKET}/data/models/wind_direction/$LOC/" \
-            --dirs-only 2>/dev/null | grep 'wind_mvn' | sort | tail -1)
-          latest="${latest%/}"
-          if [ -n "$latest" ]; then
-            echo "wind_mvn bundle: $latest"
-            rclone copy "r2:${R2_BUCKET}/data/models/wind_direction/$LOC/$latest" \
-              "../WeatherBlend/data/models/wind_direction/$LOC/$latest" \
-              --fast-list --transfers 16 --checkers 32
-          else
-            echo "::warning::No *_wind_mvn bundle on R2 for $LOC — predict will exit cleanly."
-          fi
-
-          # Static orographic JSON (oro_dynamic features).
-          mkdir -p ../WeatherBlend/data/static/orographic
-          rclone copy "r2:${R2_BUCKET}/data/static/orographic/${LOC}.json" \
-            "../WeatherBlend/data/static/orographic/" --checkers 4
+          MODE=predict R2_SOURCE="r2:${R2_BUCKET}" \
+            bash scripts/sync_train_data.sh "$LOC" wind_mvn
 
       - name: Run wind_mvn predict
         # ~10s wall for ~72 rows (3 leads × 24 valid_times).

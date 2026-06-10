@@ -102,44 +102,19 @@ jobs:
           rclone copy "r2:${R2_BUCKET}/config/config.yaml" ./config/ --checkers 4
 
       - name: Pull live forecast tree + 3f bundles + bound 3a predictions
-        # Three R2 pulls:
-        #   1. Membury forecast tree — feeds the 15-feature live vector
-        #      (predict_3f.build_live_features).
-        #   2. Latest *_phase3f bundle per Membury station — the NGBoost
-        #      pickles + preprocess + metadata. predict_3f.find_latest_bundle
-        #      filters to the newest with the per-lead pickle layout.
-        #   3. Latest *non-phase-suffixed (= 3a champion) predictions
-        #      parquet per Membury station for today's anchor — supplies
-        #      π. predict_3f reads the exact bound version stamped in
-        #      the 3f bundle's training_metadata.precip_3a_version.
+        # Forecasts + the latest *_phase3f bundle per Membury station come
+        # from the single source of truth (scripts/sync_train_data.sh
+        # MODE=predict, shared with train + smoke). The third pull — the
+        # bound 3a champion PREDICTIONS — stays inline: predict_3f resolves
+        # the exact precip_3a_version from each bundle's training_metadata at
+        # runtime, so it can't be declared statically in the sync script.
         #
         # No truth pull — predict has no labels to join.
         env:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
-          mkdir -p ../WeatherBlend/data/forecasts/location=membury_devon
-          for m in gfs_seamless ecmwf_ifs025 icon_seamless meteofrance_seamless gem_seamless ecmwf_aifs025_single jma_seamless; do
-            rclone copy "r2:${R2_BUCKET}/data/forecasts/location=membury_devon/model=$m" \
-              "../WeatherBlend/data/forecasts/location=membury_devon/model=$m" \
-              --fast-list --transfers 16 --checkers 32
-          done
-
-          # Latest *_phase3f bundle per Membury station. Station list
-          # comes from R2 — no hardcoded names. The latest selector
-          # mirrors predict-4a's: lexicographic max of phase3f-tagged
-          # version dirs.
-          mkdir -p ../WeatherBlend/data/models/rainfall_amount
-          for st in $(rclone lsf "r2:${R2_BUCKET}/data/models/rainfall_amount/" --dirs-only 2>/dev/null); do
-            st="${st%/}"
-            latest=$(rclone lsf "r2:${R2_BUCKET}/data/models/rainfall_amount/${st}/" --dirs-only 2>/dev/null \
-              | grep 'phase3f' | sort | tail -1)
-            latest="${latest%/}"
-            [ -z "$latest" ] && continue
-            echo "3f bundle for ${st}: ${latest}"
-            rclone copy "r2:${R2_BUCKET}/data/models/rainfall_amount/${st}/${latest}" \
-              "../WeatherBlend/data/models/rainfall_amount/${st}/${latest}" \
-              --fast-list --transfers 16 --checkers 32
-          done
+          MODE=predict R2_SOURCE="r2:${R2_BUCKET}" \
+            bash scripts/sync_train_data.sh membury_devon 3f
 
           # Bound 3a predictions for today's anchor. predict_3f resolves
           # precip_3a_version from each bundle's training_metadata, so

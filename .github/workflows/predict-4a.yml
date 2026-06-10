@@ -113,64 +113,20 @@ jobs:
           mkdir -p ./config
           rclone copy "r2:${R2_BUCKET}/config/config.yaml" ./config/ --checkers 4
 
-      - name: Pull live forecast tree + EA rainfall + orographic + saved BART bundles from R2
-        # Live forecast tree (RunTimeSource='reported') for prediction
-        # features.
-        #
-        # EA rainfall truth IS pulled (2026-05-31): since commit 3641d44
-        # ("swap to per-station rich+oro (68 features) BART") 4a's rich-oro
-        # bundles use antecedent-rain FEATURES (ea_rain_prev_24h_mm etc.,
-        # built by _shared.build_rich_oro_features_live -> _load_hourly_rain),
-        # not just labels. predict_one_station routes to the rich-oro builder
-        # whenever the loaded bundle has oro_* features, so once the first
-        # rich+oro bundle was minted, predict needs the rainfall tree. The
-        # old comment ("NO truth pull — predict has no labels") predated the
-        # rich-oro swap and caused the 2026-05-31 predict-4a failure.
-        #
-        # Saved bundles (state.rds + arrays.npz + preprocess.json + the
-        # two metadata json files) come from retrain-python.yml's 4a
-        # training; predict reads the latest *phase4a* version dir per station.
+      - name: Pull predict data (sync_train_data.sh MODE=predict)
+        # Single source of truth for what 4a reads at predict time:
+        # forecasts + EA rainfall (antecedent-rain features) + static
+        # orographic (oro_* terrain features) + the latest phase4a bundle
+        # per station. Declared once in scripts/sync_train_data.sh and shared
+        # with the train pull + the smoke, so predict can't silently drift
+        # from what the rich-oro builder reads (the 2026-05-31 failure was
+        # this workflow hand-rolling a stale subset). MODE=predict skips the
+        # truth-as-label-only trees + the promote MANIFEST.
         env:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
-          mkdir -p ../WeatherBlend/data/forecasts/location=bonehill_rocks
-          for m in gfs_seamless ecmwf_ifs025 icon_seamless meteofrance_seamless gem_seamless ecmwf_aifs025_single jma_seamless; do
-            rclone copy "r2:${R2_BUCKET}/data/forecasts/location=bonehill_rocks/model=$m" \
-              "../WeatherBlend/data/forecasts/location=bonehill_rocks/model=$m" \
-              --fast-list --transfers 16 --checkers 32
-          done
-          # EA rainfall truth — feeds the rich-oro antecedent-rain features.
-          mkdir -p ../WeatherBlend/data/truth/rainfall
-          rclone copy "r2:${R2_BUCKET}/data/truth/rainfall" \
-            "../WeatherBlend/data/truth/rainfall" \
-            --fast-list --transfers 16 --checkers 32
-          # Static orographic JSON — feeds the rich-oro oro_* terrain features
-          # (build_rich_oro_features_live reads data/static/orographic/{slug}.json
-          # per station). Same dependency set as 3o: forecasts + rainfall +
-          # orographic + models. Missing this was the 2nd half of the
-          # 2026-05-31 predict-4a failure (surfaced once rainfall was added).
-          mkdir -p ../WeatherBlend/data/static/orographic
-          rclone copy "r2:${R2_BUCKET}/data/static/orographic" \
-            "../WeatherBlend/data/static/orographic" \
-            --include '*.json' --checkers 8
-          # Saved BART bundles: pull ONLY the newest *phase4a* version per
-          # station. predict reads just the latest, but 4a versions
-          # accumulate every retrain — globbing **/*phase4a*/** pulled the
-          # whole growing history (incl. orphans) every run, which is what
-          # eventually made this step slow enough to hit the job timeout.
-          # Station list + latest version both come from R2 — no hardcoded list.
-          mkdir -p ../WeatherBlend/data/models/precipitation
-          for st in $(rclone lsf "r2:${R2_BUCKET}/data/models/precipitation/" --dirs-only); do
-            st="${st%/}"
-            latest=$(rclone lsf "r2:${R2_BUCKET}/data/models/precipitation/${st}/" --dirs-only \
-              | grep 'phase4a' | sort | tail -1)
-            latest="${latest%/}"
-            [ -z "$latest" ] && continue
-            echo "4a bundle for ${st}: ${latest}"
-            rclone copy "r2:${R2_BUCKET}/data/models/precipitation/${st}/${latest}" \
-              "../WeatherBlend/data/models/precipitation/${st}/${latest}" \
-              --fast-list --transfers 16 --checkers 32
-          done
+          MODE=predict R2_SOURCE="r2:${R2_BUCKET}" \
+            bash scripts/sync_train_data.sh bonehill_rocks 4a
 
       - name: Run Phase 4a state-load + predict
         # Per-cell BART: loads N states per station (one per lead),
