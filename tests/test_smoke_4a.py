@@ -275,9 +275,12 @@ class TestPredict4aSmoke:
         import pandas as pd
         out = pd.read_parquet(out_path)
         assert len(out) > 0, "predictions parquet is empty"
+        # Lead 12 = today's remaining hours served by the m24 state (no
+        # native m12 model; 2026-06-10 — the per-lead policy plan's
+        # short-lead cell, study-backed for 4a by reports/crosslead_4a_study).
         emitted_leads = set(out["LeadHours"].unique().tolist())
-        assert emitted_leads == {24, 48, 72, 96, 120}, (
-            f"expected predictions for every trained lead; got {emitted_leads}"
+        assert emitted_leads == {12, 24, 48, 72, 96, 120}, (
+            f"expected predictions for every trained lead + the lead-12 cell; got {emitted_leads}"
         )
         # Required output columns the 4b mint + verify_4a both read.
         for col in ("ValidTimeUtc", "LeadHours", "ProbWet",

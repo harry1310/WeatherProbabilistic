@@ -770,7 +770,15 @@ def build_rich_oro_features_live(
     df["doy_cos"]  = np.cos(doy_angle)
 
     # Per-row trained-lead bucket (mirrors predict_4a.build_live_features).
+    # Same-day rows bucket to 0 — relabel them as the lead-12 cell (today's
+    # remaining hours; 2026-06-10, the per-lead policy plan's short-lead
+    # extension). No lead-12 model exists — the caller routes the 12-bucket
+    # to the m24 state, which the 4a cross-lead study found to be the best
+    # candidate at 12-18h on both SELECT and SCORE slices. Whether the rows
+    # survive is still the caller's `leads` filter, so 3f/other callers that
+    # don't pass 12 are unchanged.
     df["lead"] = df["ValidTimeUtc"].apply(lambda v: lead_day_bucket(v, anchor))
+    df.loc[df["lead"] == 0, "lead"] = 12
     df = df[df["lead"].isin(leads)].reset_index(drop=True)
     df["lead"] = df["lead"].astype(int)
 

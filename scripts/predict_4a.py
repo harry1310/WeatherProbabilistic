@@ -93,6 +93,16 @@ PHASE = "4a"
 # membury_devon when WB_LOCATION selects it (Phase B, commit 5).
 STATIONS = list(stations_for_location(ACTIVE_LOCATION))
 LEADS = [24, 48, 72, 96, 120]
+
+# Predict TARGETS = the trained model leads PLUS the lead-12 cell (today's
+# remaining hours), added 2026-06-10. There is no lead-12 BART — the 12
+# bucket runs the m24 state on today's (fresher) live input, the same
+# default rule the .NET 3c/3o predict uses for its lead-12 targets. The 4a
+# cross-lead study (reports/crosslead_4a_study/) found plain m24 the best
+# of all 15 candidates in the 12-18h band on both SELECT and SCORE slices.
+# This also completes the member set for a future lead-12 4b mint (3c/3o
+# gained lead-12 the same day).
+TARGET_LEADS = [12] + LEADS
 HORIZON_DAYS = 7
 
 # Same warm-scaffold rationale as predict_4a.py: NTREE is structural,
@@ -226,9 +236,11 @@ def build_live_features(station_friendly: str, anchor: datetime) -> pd.DataFrame
     # that lead's BART and writes the bucket as LeadHours, so the parquet
     # matches 3a/3e: hourly valid times, bucket lead label.
     df["lead"] = df["ValidTimeUtc"].apply(lambda v: lead_day_bucket(v, anchor))
-    # Drop valid times whose bucket has no trained BART — same-day rows
-    # (lead < 24) and anything past the longest trained lead.
-    df = df[df["lead"].isin(LEADS)].reset_index(drop=True)
+    # Same-day rows bucket to 0 — relabel as the lead-12 cell (served by the
+    # m24 state; see TARGET_LEADS). Anything past the longest trained lead
+    # still drops.
+    df.loc[df["lead"] == 0, "lead"] = 12
+    df = df[df["lead"].isin(TARGET_LEADS)].reset_index(drop=True)
     df["lead"] = df["lead"].astype(int)   # per-cell: integer lead matches dict keys
     return df
 
@@ -367,7 +379,7 @@ def predict_one_station(bundle_dir: Path, station_friendly: str,
                 f"{ACTIVE_LOCATION!r}) — can't assign oro_station_id for predict.")
         df_live = build_rich_oro_features_live(
             station_friendly, station_slug, station_index, anchor,
-            horizon_days=HORIZON_DAYS, leads=LEADS)
+            horizon_days=HORIZON_DAYS, leads=TARGET_LEADS)
     else:
         df_live = build_live_features(station_friendly, anchor)
     if len(df_live) == 0:
@@ -377,21 +389,27 @@ def predict_one_station(bundle_dir: Path, station_friendly: str,
           flush=True)
 
     per_lead_outputs: list[pd.DataFrame] = []
-    for lead in LEADS:
-        if str(lead) not in preprocess["per_lead"]:
-            print(f"    lead {lead}h: not in bundle's preprocess — skipping")
+    for lead in TARGET_LEADS:
+        # Lead 12 has no model of its own — its rows run the m24 state on
+        # today's fresher input (TARGET_LEADS doc above). The output keeps
+        # LeadHours=12 so the 4b join / verify / site see the bucket label.
+        model_lead = 24 if lead == 12 else lead
+        if str(model_lead) not in preprocess["per_lead"]:
+            print(f"    lead {lead}h: model lead {model_lead}h not in bundle's preprocess — skipping")
             continue
         df_lead = df_live[df_live["lead"] == lead].reset_index(drop=True)
         if len(df_lead) == 0:
             print(f"    lead {lead}h: no live rows for this lead — skipping")
             continue
-        preprocess_lead = preprocess["per_lead"][str(lead)]
+        preprocess_lead = preprocess["per_lead"][str(model_lead)]
         # Carry NTREE from the top-level preprocess so we don't re-read
         # it per-cell; the train script writes one NTREE for the whole
         # bundle today.
         preprocess_lead.setdefault("ntree", preprocess.get("ntree", 500))
         preprocess_lead.setdefault("seed", preprocess.get("seed", 42))
-        out = predict_one_cell(bundle_dir, lead, df_lead, preprocess_lead)
+        out = predict_one_cell(bundle_dir, model_lead, df_lead, preprocess_lead)
+        if lead != model_lead:
+            out["LeadHours"] = lead
         per_lead_outputs.append(out)
         # Free R-side warm + bundle state before the next lead so peak
         # RAM stays bounded across the lead loop.
