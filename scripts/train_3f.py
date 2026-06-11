@@ -59,6 +59,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import pickle
 import sys
 import time
@@ -68,18 +69,19 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from _shared import force_utf8_stdio  # noqa: E402
+
 # Ensure UTF-8 stdout/stderr so non-ASCII (μ, σ) doesn't crash on CP1252 hosts.
-for _stream in (sys.stdout, sys.stderr):
-    if hasattr(_stream, "reconfigure"):
-        _stream.reconfigure(encoding="utf-8", errors="replace")
+force_utf8_stdio()
 
 from ngboost import NGBRegressor  # noqa: E402
 from ngboost.distns import LogNormal as NGBLogNormal  # noqa: E402
 from ngboost.scores import LogScore  # noqa: E402
 from sklearn.preprocessing import StandardScaler  # noqa: E402
-
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
 
 from src.data import WEATHERBLEND_DATA_ROOT, WET_THRESHOLD_MM  # noqa: E402
 from src.retrain_guard import build_check_and_save_versioned  # noqa: E402
@@ -91,7 +93,6 @@ from src.manifest_promote import promote_station_version  # noqa: E402
 # the row level (modulo the wet-only filter applied below). Any drift
 # between 3f's stage-2 features and 3a's stage-1 features would break
 # the mixed-distribution math at predict time.
-sys.path.insert(0, str(ROOT / "scripts"))
 from _shared import (  # noqa: E402
     MODELS_LEAN,
     build_features_via_duckdb,
@@ -105,7 +106,13 @@ from _shared import (  # noqa: E402
 
 PHASE = "3f"
 TARGET = "rainfall_amount"
-ACTIVE_LOCATION = "membury_devon"
+
+# Membury-only by default. WB_LOCATION (set per matrix job by
+# retrain-python.yml) can swap if 3f ever ships for another location —
+# phases.yaml's locations filter is the gate. Same pattern as every
+# other train/predict script; was hardcoded "membury_devon" until
+# 2026-06-10, which would have silently ignored the workflow's env var.
+ACTIVE_LOCATION = os.environ.get("WB_LOCATION", "membury_devon")
 
 # Membury rainfall stations — match phases.yaml's `locations:` filter
 # + the bake-off scope.
@@ -638,8 +645,12 @@ def write_bundle(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
+    # --anchor is informational-only: it's parsed + logged for audit but the
+    # version string always stamps now() (smoke tests pass it; nothing else
+    # consumes it).
     parser.add_argument("--anchor", default=None,
-                        help="Anchor date YYYY-MM-DD UTC for the version string. Default: today.")
+                        help="Anchor date YYYY-MM-DD UTC (informational — logged only; "
+                             "the version string always uses the current time). Default: today.")
     parser.add_argument("--stations", nargs="*", default=None,
                         help="Station subset (default: all 3 Membury active).")
     parser.add_argument("--models-root", default=str(WEATHERBLEND_DATA_ROOT / "models"),

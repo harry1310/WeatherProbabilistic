@@ -15,8 +15,12 @@ Contains:
     across phase 6 artefact dirs.
   * resolve_station, build_features_via_duckdb, time_split — the
     feature-build pipeline shared by production + bake-off paths.
+  * compose_precip_aggregates, add_calendar_features — the C#-parity
+    cross-NWP precip stats + cyclical calendar blocks every precip
+    feature builder (train AND live) composes.
   * add_synoptic_features — synoptic flow features used by 4a + the
     rich-feats bake-off.
+  * force_utf8_stdio, finite_or — small cross-script utilities.
 """
 from __future__ import annotations
 
@@ -81,6 +85,25 @@ OUTPUT_ROOT = ROOT / "reports" / "phase6_artefacts"
 # unchanged.
 
 
+def force_utf8_stdio() -> None:
+    """Reconfigure stdout/stderr to UTF-8 so non-ASCII output (μ, σ, →)
+    doesn't crash on CP1252 Windows hosts. Call before any printing."""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
+def finite_or(value, fallback: float) -> float:
+    """value as float when finite, else fallback — metadata doubles must
+    never be null/NaN (the .NET PerLeadStats deserialiser rejects both;
+    the 2026-05-12 4a incident)."""
+    try:
+        v = float(value)
+        return v if np.isfinite(v) else float(fallback)
+    except (TypeError, ValueError):
+        return float(fallback)
+
+
 def resolve_station(station_input: str) -> tuple[str, str]:
     """Accept either the slug ('ea_bellever_dartmoor') or the friendly
     name ('Bellever Dartmoor') from the user. Returns (slug, friendly)."""
@@ -109,6 +132,43 @@ def lead_day_bucket(valid_time, anchor) -> int:
     v = pd.Timestamp(valid_time).normalize()
     a = pd.Timestamp(anchor).normalize()
     return (v - a).days * 24
+
+
+def compose_precip_aggregates(df: pd.DataFrame, precip_cols: list[str]) -> pd.DataFrame:
+    """Cross-NWP precip aggregates: precip_mean / precip_std / precip_max /
+    precip_agreement_wet_01, assigned onto ``df`` in place (and returned).
+
+    NaN-safe and BIT-EQUIVALENT to PrecipFeatureBuilder.ComposeRow (C#):
+    the variance divides by presentCount, NOT presentCount-1 — preserve
+    exactly, it's pinned by tests/test_rich_oro_python_vs_csharp.py.
+    Agreement is wet-count over present-count (NaN compares False so the
+    wet count is NaN-safe for free).
+    """
+    pm = df[precip_cols].to_numpy(dtype="float64")
+    present = (~np.isnan(pm)).sum(axis=1)
+    sumv = np.nansum(pm, axis=1)
+    sumsq = np.nansum(pm ** 2, axis=1)
+    mean_safe = np.where(present > 0, sumv / np.maximum(present, 1), np.nan)
+    var = np.maximum(0.0, sumsq / np.maximum(present, 1) - mean_safe ** 2)
+    df["precip_mean"] = mean_safe
+    df["precip_std"]  = np.where(present > 1, np.sqrt(var), 0.0)
+    df["precip_max"]  = np.where(present > 0, np.nanmax(pm, axis=1), np.nan)
+    wet_count = (pm >= WET_THRESHOLD_MM).sum(axis=1)
+    df["precip_agreement_wet_01"] = np.where(present > 0, wet_count / np.maximum(present, 1), np.nan)
+    return df
+
+
+def add_calendar_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Cyclical calendar encodings (UTC hour-of-day, day-of-year) onto
+    ``df`` in place (and returned). PrecipFeatureBuilder uses
+    (DayOfYear - 1) / 365 — exact same denominator + offset here."""
+    hour_angle = 2.0 * np.pi * df["ValidTimeUtc"].dt.hour / 24.0
+    doy_angle  = 2.0 * np.pi * (df["ValidTimeUtc"].dt.dayofyear - 1) / 365.0
+    df["hour_sin"] = np.sin(hour_angle)
+    df["hour_cos"] = np.cos(hour_angle)
+    df["doy_sin"]  = np.sin(doy_angle)
+    df["doy_cos"]  = np.cos(doy_angle)
+    return df
 
 
 def build_features_via_duckdb(
@@ -215,32 +275,10 @@ def build_features_via_duckdb(
     df = con.execute(sql).fetch_df()
     con.close()
 
-    # Compose spread features + cyclical features in one pass — matches
-    # PrecipFeatureBuilder.ComposeRow exactly. NaN-safe via numpy nanmean/
-    # nanstd/nanmax; agreement is wet-count over present-count.
-    precip_cols = [f"precip_{short}" for _, short in MODELS_LEAN]
-    pm_arr = df[precip_cols].to_numpy(dtype="float64")
-    df["precip_mean"] = np.nanmean(pm_arr, axis=1)
-    # Sample std with NaN handling — match PrecipFeatureBuilder's manual
-    # variance calc which uses `presentCount` not `presentCount-1`.
-    present = (~np.isnan(pm_arr)).sum(axis=1)
-    sumsq = np.nansum(pm_arr ** 2, axis=1)
-    sumv = np.nansum(pm_arr, axis=1)
-    mean_safe = np.where(present > 0, sumv / np.maximum(present, 1), np.nan)
-    var = np.maximum(0.0, sumsq / np.maximum(present, 1) - mean_safe ** 2)
-    df["precip_std"] = np.where(present > 1, np.sqrt(var), 0.0)
-    df["precip_max"] = np.nanmax(pm_arr, axis=1)
-    wet_count = (pm_arr >= WET_THRESHOLD_MM).sum(axis=1)  # NaN compares False so OK
-    df["precip_agreement_wet_01"] = np.where(present > 0, wet_count / np.maximum(present, 1), np.nan)
-
-    # Cyclical (UTC hour-of-day, day-of-year). PrecipFeatureBuilder uses
-    # (DayOfYear - 1) / 365 — exact same denominator + offset here.
-    hour_angle = 2.0 * np.pi * df["ValidTimeUtc"].dt.hour / 24.0
-    doy_angle = 2.0 * np.pi * (df["ValidTimeUtc"].dt.dayofyear - 1) / 365.0
-    df["hour_sin"] = np.sin(hour_angle)
-    df["hour_cos"] = np.cos(hour_angle)
-    df["doy_sin"] = np.sin(doy_angle)
-    df["doy_cos"] = np.cos(doy_angle)
+    # Spread + cyclical features — matches PrecipFeatureBuilder.ComposeRow
+    # exactly (see the helpers' docstrings for the C#-parity caveats).
+    compose_precip_aggregates(df, [f"precip_{short}" for _, short in MODELS_LEAN])
+    add_calendar_features(df)
 
     df["wet"] = (df["precip_mm_hour"] >= WET_THRESHOLD_MM).astype("int8")
     return df.reset_index(drop=True)
@@ -388,6 +426,22 @@ def _compute_persistence(hourly_rain: dict, run_time):
     )
 
 
+def _rich_per_nwp_pivot_sql() -> str:
+    """Per-NWP pivot SELECT lines for the rich spec: 5 columns per NWP
+    (precip, dew, rh, dewdep, pressure), grouped by variable then NWP so
+    the result column order matches RICH_FEATURE_NAMES' per-NWP blocks.
+    Shared by the train-time and live builders so their SQL can't drift."""
+    lines = []
+    for expr, prefix in (("Precipitation",               "precip"),
+                         ("DewPoint2m",                  "dew"),
+                         ("RelativeHumidity2m",          "rh"),
+                         ("Temperature2m - DewPoint2m",  "dew_depression"),
+                         ("SurfacePressure",             "pressure")):
+        for full, short in MODELS_RICH:
+            lines.append(f"        MAX(CASE WHEN Model = '{full}' THEN {expr} END) AS {prefix}_{short},")
+    return "\n".join(lines)
+
+
 def build_rich_features_via_duckdb(
     station_friendly: str,
     lead_hours: int,
@@ -412,24 +466,11 @@ def build_rich_features_via_duckdb(
     """
     fc_glob = str((WEATHERBLEND_DATA_ROOT / "forecasts" / "**" / "*.parquet")).replace("\\", "/")
     model_in = "(" + ",".join(f"'{full}'" for full, _ in MODELS_RICH) + ")"
-    n = len(MODELS_RICH)
 
     valid_filter = (f"          AND ValidTimeUtc >= TIMESTAMP '{min_valid_time:%Y-%m-%d %H:%M:%S}'\n"
                     if min_valid_time is not None else "")
 
-    # Per-NWP pivots: 5 columns per NWP (precip, dew, rh, dewdep, pressure).
-    per_nwp_pivots_lines = []
-    for full, short in MODELS_RICH:
-        per_nwp_pivots_lines.append(f"        MAX(CASE WHEN Model = '{full}' THEN Precipitation END) AS precip_{short},")
-    for full, short in MODELS_RICH:
-        per_nwp_pivots_lines.append(f"        MAX(CASE WHEN Model = '{full}' THEN DewPoint2m END) AS dew_{short},")
-    for full, short in MODELS_RICH:
-        per_nwp_pivots_lines.append(f"        MAX(CASE WHEN Model = '{full}' THEN RelativeHumidity2m END) AS rh_{short},")
-    for full, short in MODELS_RICH:
-        per_nwp_pivots_lines.append(f"        MAX(CASE WHEN Model = '{full}' THEN Temperature2m - DewPoint2m END) AS dew_depression_{short},")
-    for full, short in MODELS_RICH:
-        per_nwp_pivots_lines.append(f"        MAX(CASE WHEN Model = '{full}' THEN SurfacePressure END) AS pressure_{short},")
-    per_nwp_pivots = "\n".join(per_nwp_pivots_lines)
+    per_nwp_pivots = _rich_per_nwp_pivot_sql()
 
     sql = f"""
         WITH latest AS (
@@ -472,10 +513,8 @@ def build_rich_features_via_duckdb(
     # signal (only ~2% of total but they trip np.nanmax warnings and break
     # bit-equivalence vs the C# dump).
     precip_cols = [f"precip_{s}" for _, s in MODELS_RICH]
-    pm = df[precip_cols].to_numpy(dtype="float64")
-    any_present = (~np.isnan(pm)).any(axis=1)
+    any_present = df[precip_cols].notna().any(axis=1)
     df = df[any_present].copy()
-    pm = pm[any_present]
 
     # Inner-join against EA hourly truth. Mirrors C# BuildForLead's
     # "if (!hourlyRain.TryGetValue(valid, out var truth)) continue;" drop.
@@ -485,27 +524,11 @@ def build_rich_features_via_duckdb(
     keep = truth_series.notna()
     df = df[keep].copy()
     df["precip_mm_hour"] = truth_series[keep].values
-    pm = pm[keep.to_numpy()]
 
-    # Cross-NWP precip aggregates (same NaN-safe logic as the lean builder).
-    present = (~np.isnan(pm)).sum(axis=1)
-    sumv = np.nansum(pm, axis=1)
-    sumsq = np.nansum(pm ** 2, axis=1)
-    mean_safe = np.where(present > 0, sumv / np.maximum(present, 1), np.nan)
-    var = np.maximum(0.0, sumsq / np.maximum(present, 1) - mean_safe ** 2)
-    df["precip_mean"] = np.where(present > 0, mean_safe, np.nan)
-    df["precip_std"]  = np.where(present > 1, np.sqrt(var), 0.0)
-    df["precip_max"]  = np.where(present > 0, np.nanmax(pm, axis=1), np.nan)
-    wet_count = (pm >= WET_THRESHOLD_MM).sum(axis=1)
-    df["precip_agreement_wet_01"] = np.where(present > 0, wet_count / np.maximum(present, 1), np.nan)
-
-    # Cyclical calendar encodings — exact same denominator + offset as C#.
-    hour_angle = 2.0 * np.pi * df["ValidTimeUtc"].dt.hour / 24.0
-    doy_angle  = 2.0 * np.pi * (df["ValidTimeUtc"].dt.dayofyear - 1) / 365.0
-    df["hour_sin"] = np.sin(hour_angle)
-    df["hour_cos"] = np.cos(hour_angle)
-    df["doy_sin"]  = np.sin(doy_angle)
-    df["doy_cos"]  = np.cos(doy_angle)
+    # Cross-NWP precip aggregates + cyclical calendar (same NaN-safe logic
+    # as the lean builder — one shared implementation).
+    compose_precip_aggregates(df, precip_cols)
+    add_calendar_features(df)
 
     # 4 EA persistence features per row, anchored at run_time = valid_time - lead.
     run_times = df["ValidTimeUtc"] - pd.Timedelta(hours=lead_hours)
@@ -582,41 +605,24 @@ def _upwind_gain_at(oro_rec: dict, wind_sin: float, wind_cos: float) -> float:
     return float(oro_rec.get("upwind_gain_5km", {}).get(sector, 0.0))
 
 
-def compose_v1_terrain_block(
-    station_slug: str,
-    station_index: int,
-    lead_hours: int,
-    rich_df: pd.DataFrame,
-    *,
-    min_valid_time=None,
-    run_time_source: str = "offset_day",
-) -> pd.DataFrame:
-    """Append the 9 v1 terrain features to a rich-features DataFrame. Returns
-    a NEW DataFrame with V1_TERRAIN_FEATURE_NAMES added; rows where the aux
-    NWP-mean pull has no matching valid_time are dropped (mirrors the C#
-    BuildForLead's `if (!aux.TryGetValue...) continue;` drop).
+def _apply_v1_terrain_block(df: pd.DataFrame, oro: dict, station_index: int,
+                            ws: np.ndarray, wsn: np.ndarray, wcs: np.ndarray,
+                            td: np.ndarray, p: np.ndarray) -> pd.DataFrame:
+    """Assign the 9 v1 terrain feature columns onto ``df`` in place (and
+    return it) from the orographic static dict + the per-row aux NWP-mean
+    arrays (wind speed, wind sin/cos, dew point °C, pressure hPa).
 
     Magnus formula for specific humidity and the wind-vector uplift calc
-    mirror PrecipRichOroFeatureBuilder.ComposeTerrainBlock exactly.
+    mirror PrecipRichOroFeatureBuilder.ComposeTerrainBlock exactly —
+    pinned by tests/test_rich_oro_python_vs_csharp.py. Callers differ only
+    in where the aux means come from (merged aux frame at train time,
+    pre-fetched _aux_* columns at predict time).
     """
-    oro = _load_oro_static(station_slug)
-    aux = _load_aux_nwp_means(lead_hours, min_valid_time=min_valid_time,
-                              run_time_source=run_time_source)
-    df = rich_df.merge(aux, on="ValidTimeUtc", how="inner")
-    if len(df) == 0:
-        return df
-
     elev_vs_cell = float(oro.get("elevation_vs_cell_m", 0.0))
     relief_5km   = float(oro.get("relief_5km_m", 0.0))
     rugged_5km   = float(oro.get("terrain_ruggedness_5km_m", 0.0))
     grad_dx      = float(oro.get("terrain_gradient_dx", 0.0))
     grad_dy      = float(oro.get("terrain_gradient_dy", 0.0))
-
-    ws  = df["wind_speed"].to_numpy(dtype="float64")
-    wsn = df["wind_sin"].to_numpy(dtype="float64")
-    wcs = df["wind_cos"].to_numpy(dtype="float64")
-    td  = df["dew_c"].to_numpy(dtype="float64")
-    p   = df["pres_hpa"].to_numpy(dtype="float64")
 
     # Wind-vector uplift = max(0, u·dx + v·dy). u = -ws·sin, v = -ws·cos
     # (convention: WindDirection10m is direction wind is FROM).
@@ -645,7 +651,38 @@ def compose_v1_terrain_block(
     df["oro_uplift_m_per_s"]             = uplift
     df["oro_uplift_x_q_g_per_kg"]        = uplift * q_gkg
     df["oro_station_id"]                 = float(station_index)
+    return df
 
+
+def compose_v1_terrain_block(
+    station_slug: str,
+    station_index: int,
+    lead_hours: int,
+    rich_df: pd.DataFrame,
+    *,
+    min_valid_time=None,
+    run_time_source: str = "offset_day",
+) -> pd.DataFrame:
+    """Append the 9 v1 terrain features to a rich-features DataFrame. Returns
+    a NEW DataFrame with V1_TERRAIN_FEATURE_NAMES added; rows where the aux
+    NWP-mean pull has no matching valid_time are dropped (mirrors the C#
+    BuildForLead's `if (!aux.TryGetValue...) continue;` drop).
+    """
+    oro = _load_oro_static(station_slug)
+    aux = _load_aux_nwp_means(lead_hours, min_valid_time=min_valid_time,
+                              run_time_source=run_time_source)
+    df = rich_df.merge(aux, on="ValidTimeUtc", how="inner")
+    if len(df) == 0:
+        return df
+
+    _apply_v1_terrain_block(
+        df, oro, station_index,
+        ws=df["wind_speed"].to_numpy(dtype="float64"),
+        wsn=df["wind_sin"].to_numpy(dtype="float64"),
+        wcs=df["wind_cos"].to_numpy(dtype="float64"),
+        td=df["dew_c"].to_numpy(dtype="float64"),
+        p=df["pres_hpa"].to_numpy(dtype="float64"),
+    )
     return df.reset_index(drop=True)
 
 
@@ -683,20 +720,8 @@ def build_rich_oro_features_live(
 
     fc_glob = str((WEATHERBLEND_DATA_ROOT / "forecasts" / "**" / "*.parquet")).replace("\\", "/")
     model_in = "(" + ",".join(f"'{full}'" for full, _ in MODELS_RICH) + ")"
-    n = len(MODELS_RICH)
 
-    per_nwp_pivots_lines = []
-    for full, short in MODELS_RICH:
-        per_nwp_pivots_lines.append(f"        MAX(CASE WHEN Model = '{full}' THEN Precipitation END) AS precip_{short},")
-    for full, short in MODELS_RICH:
-        per_nwp_pivots_lines.append(f"        MAX(CASE WHEN Model = '{full}' THEN DewPoint2m END) AS dew_{short},")
-    for full, short in MODELS_RICH:
-        per_nwp_pivots_lines.append(f"        MAX(CASE WHEN Model = '{full}' THEN RelativeHumidity2m END) AS rh_{short},")
-    for full, short in MODELS_RICH:
-        per_nwp_pivots_lines.append(f"        MAX(CASE WHEN Model = '{full}' THEN Temperature2m - DewPoint2m END) AS dew_depression_{short},")
-    for full, short in MODELS_RICH:
-        per_nwp_pivots_lines.append(f"        MAX(CASE WHEN Model = '{full}' THEN SurfacePressure END) AS pressure_{short},")
-    per_nwp_pivots = "\n".join(per_nwp_pivots_lines)
+    per_nwp_pivots = _rich_per_nwp_pivot_sql()
 
     # Rich pivot + aux NWP means in one CTE chain so we share the freshest-cycle
     # row-numbering pass. anchor + horizon define the live window.
@@ -744,30 +769,12 @@ def build_rich_oro_features_live(
 
     # Drop rows with no usable precip (mirrors anyNotNull filter from training).
     precip_cols = [f"precip_{s}" for _, s in MODELS_RICH]
-    pm = df[precip_cols].to_numpy(dtype="float64")
-    any_present = (~np.isnan(pm)).any(axis=1)
+    any_present = df[precip_cols].notna().any(axis=1)
     df = df[any_present].copy()
-    pm = pm[any_present]
 
-    # Cross-NWP precip aggregates.
-    present = (~np.isnan(pm)).sum(axis=1)
-    sumv = np.nansum(pm, axis=1)
-    sumsq = np.nansum(pm ** 2, axis=1)
-    mean_safe = np.where(present > 0, sumv / np.maximum(present, 1), np.nan)
-    var = np.maximum(0.0, sumsq / np.maximum(present, 1) - mean_safe ** 2)
-    df["precip_mean"] = np.where(present > 0, mean_safe, np.nan)
-    df["precip_std"]  = np.where(present > 1, np.sqrt(var), 0.0)
-    df["precip_max"]  = np.where(present > 0, np.nanmax(pm, axis=1), np.nan)
-    wet_count = (pm >= WET_THRESHOLD_MM).sum(axis=1)
-    df["precip_agreement_wet_01"] = np.where(present > 0, wet_count / np.maximum(present, 1), np.nan)
-
-    # Calendar.
-    hour_angle = 2.0 * np.pi * df["ValidTimeUtc"].dt.hour / 24.0
-    doy_angle  = 2.0 * np.pi * (df["ValidTimeUtc"].dt.dayofyear - 1) / 365.0
-    df["hour_sin"] = np.sin(hour_angle)
-    df["hour_cos"] = np.cos(hour_angle)
-    df["doy_sin"]  = np.sin(doy_angle)
-    df["doy_cos"]  = np.cos(doy_angle)
+    # Cross-NWP precip aggregates + calendar (shared with the train builders).
+    compose_precip_aggregates(df, precip_cols)
+    add_calendar_features(df)
 
     # Per-row trained-lead bucket (mirrors predict_4a.build_live_features).
     # Same-day rows bucket to 0 — relabel them as the lead-12 cell (today's
@@ -792,42 +799,14 @@ def build_rich_oro_features_live(
     df["ea_dry_hours_trailing"] = [p[3] for p in persistence]
 
     # ---- v1 terrain block from the pre-fetched aux columns ----
-    oro = _load_oro_static(station_slug)
-    elev_vs_cell = float(oro.get("elevation_vs_cell_m", 0.0))
-    relief_5km   = float(oro.get("relief_5km_m", 0.0))
-    rugged_5km   = float(oro.get("terrain_ruggedness_5km_m", 0.0))
-    grad_dx      = float(oro.get("terrain_gradient_dx", 0.0))
-    grad_dy      = float(oro.get("terrain_gradient_dy", 0.0))
-
-    ws  = df["_aux_wind_speed"].to_numpy(dtype="float64")
-    wsn = df["_aux_wind_sin"].to_numpy(dtype="float64")
-    wcs = df["_aux_wind_cos"].to_numpy(dtype="float64")
-    td  = df["_aux_dew_c"].to_numpy(dtype="float64")
-    p   = df["_aux_pres_hpa"].to_numpy(dtype="float64")
-
-    valid_wind = ~(np.isnan(ws) | np.isnan(wsn) | np.isnan(wcs))
-    u_east  = np.where(valid_wind, -ws * wsn, 0.0)
-    v_north = np.where(valid_wind, -ws * wcs, 0.0)
-    w = u_east * grad_dx + v_north * grad_dy
-    uplift = np.where(valid_wind, np.maximum(0.0, w), 0.0)
-
-    valid_q = ~(np.isnan(td) | np.isnan(p)) & (p > 0)
-    e_hpa = 6.112 * np.exp(17.62 * td / (td + 243.12))
-    q_kgkg = 0.622 * e_hpa / (p - 0.378 * e_hpa)
-    q_gkg = np.where(valid_q, np.maximum(0.0, q_kgkg * 1000.0), 0.0)
-
-    upwind_gain = np.array([_upwind_gain_at(oro, s, c) for s, c in zip(wsn, wcs)],
-                           dtype="float64")
-
-    df["oro_elevation_vs_cell_m"]        = elev_vs_cell
-    df["oro_relief_5km_m"]               = relief_5km
-    df["oro_ruggedness_5km_m"]           = rugged_5km
-    df["oro_wind_sin"]                   = np.where(np.isnan(wsn), 0.0, wsn)
-    df["oro_wind_cos"]                   = np.where(np.isnan(wcs), 0.0, wcs)
-    df["oro_upwind_gain_per_wind_5km_m"] = upwind_gain
-    df["oro_uplift_m_per_s"]             = uplift
-    df["oro_uplift_x_q_g_per_kg"]        = uplift * q_gkg
-    df["oro_station_id"]                 = float(station_index)
+    _apply_v1_terrain_block(
+        df, _load_oro_static(station_slug), station_index,
+        ws=df["_aux_wind_speed"].to_numpy(dtype="float64"),
+        wsn=df["_aux_wind_sin"].to_numpy(dtype="float64"),
+        wcs=df["_aux_wind_cos"].to_numpy(dtype="float64"),
+        td=df["_aux_dew_c"].to_numpy(dtype="float64"),
+        p=df["_aux_pres_hpa"].to_numpy(dtype="float64"),
+    )
 
     # Drop the temporary _aux_* columns now that the terrain block is packed.
     df = df.drop(columns=[c for c in df.columns if c.startswith("_aux_")])

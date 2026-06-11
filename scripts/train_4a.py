@@ -65,9 +65,13 @@ _user_lib = os.path.join(os.environ.get("USERPROFILE", os.environ.get("HOME", ""
                          "R", "win-library", "4.6")
 os.environ.setdefault("R_LIBS_USER", _user_lib)
 
-for _stream in (sys.stdout, sys.stderr):
-    if hasattr(_stream, "reconfigure"):
-        _stream.reconfigure(encoding="utf-8", errors="replace")
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from _shared import force_utf8_stdio  # noqa: E402
+
+force_utf8_stdio()
 
 from scipy.stats import norm  # noqa: E402
 from sklearn.preprocessing import StandardScaler  # noqa: E402
@@ -76,10 +80,6 @@ import rpy2.robjects as ro  # noqa: E402
 from rpy2.robjects import default_converter, numpy2ri, pandas2ri  # noqa: E402
 from rpy2.robjects.conversion import localconverter  # noqa: E402
 from rpy2.robjects.packages import importr  # noqa: E402
-
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "scripts"))
 
 from src.data import LOCATION, WEATHERBLEND_DATA_ROOT, stations_for_location  # noqa: E402
 
@@ -316,8 +316,7 @@ def train_one_station(station_friendly: str, station_slug: str) -> dict:
     }
 
 
-def write_per_cell_bundle(out_dir: Path, station_slug: str, station_friendly: str,
-                          version: str, result: dict, anchor: datetime) -> None:
+def write_per_cell_bundle(out_dir: Path, version: str, result: dict) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # 1) state.rds per lead — saveRDS through R itself.
@@ -429,8 +428,12 @@ def _json_sanitize_nans(obj):
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
+    # --anchor is informational-only: it's parsed + logged for audit but the
+    # version string always stamps now() (smoke tests pass it; nothing else
+    # consumes it).
     p.add_argument("--anchor", default=None,
-                   help="Anchor date YYYY-MM-DD UTC for the version string. Default: today.")
+                   help="Anchor date YYYY-MM-DD UTC (informational — logged only; "
+                        "the version string always uses the current time). Default: today.")
     p.add_argument("--stations", nargs="*", default=None,
                    help="Station subset (default: all 3 active).")
     p.add_argument("--models-root", default=str(WEATHERBLEND_DATA_ROOT / "models"),
@@ -500,7 +503,7 @@ def main() -> None:
             ro.r('gc()')
             continue
 
-        write_per_cell_bundle(bundle_dir, station_slug, station_friendly, version, result, anchor)
+        write_per_cell_bundle(bundle_dir, version, result)
         bundles_written += 1
 
         # Promote into MANIFEST.json's Active so the site renders this

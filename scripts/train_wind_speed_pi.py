@@ -37,6 +37,13 @@ import lightgbm as lgb
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
+
+from _shared import finite_or, force_utf8_stdio  # noqa: E402
+
+# UTF-8 stdout/stderr before any prints — this script logs '→' and would
+# crash a CP1252 Windows host without the reconfigure.
+force_utf8_stdio()
+
 import train_wind_mvn as T  # noqa: E402  (build_features / load_dunkeswell / load_oro_static / time_split / LEADS / NWPS)
 from src.manifest_promote import promote_station_version  # noqa: E402
 from src.retrain_guard import build_check_and_save_versioned  # noqa: E402
@@ -191,16 +198,6 @@ def _best_single_nwp_wsp_mae(df_slice, y_slice):
         if not (mae >= best_mae):   # NaN-safe "is better"
             best_name, best_mae = m, mae
     return best_name, best_mae
-
-
-def _finite_or(value, fallback):
-    """Metadata doubles must never be null/NaN — the .NET PerLeadStats
-    deserialiser rejects both (the 2026-05-12 4a incident)."""
-    try:
-        v = float(value)
-        return v if math.isfinite(v) else float(fallback)
-    except (TypeError, ValueError):
-        return float(fallback)
 
 
 def _required_filter(df, feats=None):
@@ -516,8 +513,8 @@ def _write_bundle(out_dir, location, version, per_lead, feature_names):
             # deserialiser rejects both).
             "BestSingle": c.get("best_single") or "wind_speed_lgb_qmed",
             "BlendTestMae": c["q50_mae"], "BlendTestRmse": c["width"], "BlendTestBias": None,
-            "BestSingleValMae": _finite_or(c.get("bs_val_mae"), c["q50_mae"]),
-            "BestSingleTestMae": _finite_or(c.get("bs_test_mae"), c["q50_mae"]),
+            "BestSingleValMae": finite_or(c.get("bs_val_mae"), c["q50_mae"]),
+            "BestSingleTestMae": finite_or(c.get("bs_test_mae"), c["q50_mae"]),
             "RequiredFilterTestMae": c.get("rf_q50_mae"),
             "RequiredFilterTestRows": c.get("rf_n_test"),
             "RequiredFilterTestRange": c.get("rf_range"),

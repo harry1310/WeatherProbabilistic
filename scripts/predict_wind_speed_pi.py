@@ -44,17 +44,17 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-for _stream in (sys.stdout, sys.stderr):
-    if hasattr(_stream, "reconfigure"):
-        _stream.reconfigure(encoding="utf-8", errors="replace")
-
 warnings.filterwarnings("ignore")
-
-import lightgbm as lgb  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
+
+from _shared import force_utf8_stdio  # noqa: E402
+
+force_utf8_stdio()
+
+import lightgbm as lgb  # noqa: E402
 
 from src.data import WEATHERBLEND_DATA_ROOT  # noqa: E402
 import predict_wind_mvn as PM  # noqa: E402  (build_live_for_lead / load_oro_static / NWPS / NWP_SHORT)
@@ -96,14 +96,14 @@ def find_latest_bundle(models_root: Path, location: str) -> Path:
         if not (c / "calibration.json").is_file(): continue
         if not (c / "feature_schema.json").is_file(): continue
         if not (c / "training_metadata.json").is_file(): continue
-        if not all((c / f"q_{tag}_lead_{L}h.txt").is_file()
-                   for tag in ("lo", "med", "hi") for L in LEADS
-                   if (c / f"q_med_lead_{L}h.txt").is_file()):
-            # at least one lead's full triple must exist; loop below skips
-            # leads whose boosters are missing.
-            pass
-        if any((c / f"q_med_lead_{L}h.txt").is_file() for L in LEADS):
-            return c
+        # At least one lead must have its FULL q_lo/q_med/q_hi triple — the
+        # per-lead loop below skips incomplete leads, so a bundle with no
+        # complete triple would silently emit nothing.
+        if not any(all((c / f"q_{tag}_lead_{L}h.txt").is_file()
+                       for tag in ("lo", "med", "hi"))
+                   for L in LEADS):
+            continue
+        return c
     raise FileNotFoundError(
         f"No usable *_wind_speed_lgb bundle under {parent}. Re-run train.")
 

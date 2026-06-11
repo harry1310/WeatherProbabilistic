@@ -44,24 +44,25 @@ import numpy as np
 import pandas as pd
 from scipy.stats import norm
 
-for _stream in (sys.stdout, sys.stderr):
-    if hasattr(_stream, "reconfigure"):
-        _stream.reconfigure(encoding="utf-8", errors="replace")
-
-import duckdb  # noqa: E402
-
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
+from _shared import force_utf8_stdio  # noqa: E402
+
+force_utf8_stdio()
+
+import duckdb  # noqa: E402
+
 from src.data import (  # noqa: E402
     WEATHERBLEND_DATA_ROOT,
-    WET_THRESHOLD_MM,
     stations_for_location,
 )
 
 from _shared import (  # noqa: E402
     MODELS_LEAN,
+    add_calendar_features,
+    compose_precip_aggregates,
     lead_day_bucket,
     resolve_station,
 )
@@ -173,25 +174,10 @@ def build_live_features(anchor: datetime) -> pd.DataFrame:
     if len(df) == 0:
         return df
 
-    precip_cols = [f"precip_{short}" for _, short in MODELS_LEAN]
-    pm_arr = df[precip_cols].to_numpy(dtype="float64")
-    present = (~np.isnan(pm_arr)).sum(axis=1)
-    sumv = np.nansum(pm_arr, axis=1)
-    sumsq = np.nansum(pm_arr ** 2, axis=1)
-    mean_safe = np.where(present > 0, sumv / np.maximum(present, 1), np.nan)
-    var = np.maximum(0.0, sumsq / np.maximum(present, 1) - mean_safe ** 2)
-    df["precip_mean"] = np.nanmean(pm_arr, axis=1)
-    df["precip_std"] = np.where(present > 1, np.sqrt(var), 0.0)
-    df["precip_max"] = np.nanmax(pm_arr, axis=1)
-    wet_count = (pm_arr >= WET_THRESHOLD_MM).sum(axis=1)
-    df["precip_agreement_wet_01"] = np.where(present > 0, wet_count / np.maximum(present, 1), np.nan)
-
-    hour_angle = 2.0 * np.pi * df["ValidTimeUtc"].dt.hour / 24.0
-    doy_angle = 2.0 * np.pi * (df["ValidTimeUtc"].dt.dayofyear - 1) / 365.0
-    df["hour_sin"] = np.sin(hour_angle)
-    df["hour_cos"] = np.cos(hour_angle)
-    df["doy_sin"] = np.sin(doy_angle)
-    df["doy_cos"] = np.cos(doy_angle)
+    # Spread + calendar features — same shared C#-parity implementation the
+    # train-side builders use (see _shared.compose_precip_aggregates).
+    compose_precip_aggregates(df, [f"precip_{short}" for _, short in MODELS_LEAN])
+    add_calendar_features(df)
 
     df["lead"] = df["ValidTimeUtc"].apply(lambda v: lead_day_bucket(v, anchor))
     df = df[df["lead"].isin(LEADS)].reset_index(drop=True)
