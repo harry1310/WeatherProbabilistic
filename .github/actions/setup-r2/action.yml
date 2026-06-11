@@ -1,0 +1,59 @@
+name: Setup rclone for R2 + fetch WeatherBlend config
+description: >
+  Single source of truth for the rclone install + R2 remote config + the
+  cross-repo config.yaml fetch that every WP workflow repeated inline
+  (~30 secret-handling lines × 4 workflows before 2026-06-11). Mirrors
+  WeatherBlend's .github/actions/setup-r2 pattern. phases.yaml is fetched
+  only where needed (retrain-python keeps its own step — it also cats the
+  file for the run log).
+
+inputs:
+  access_key_id:
+    description: R2 access key ID (secrets.R2_ACCESS_KEY_ID).
+    required: true
+  secret_access_key:
+    description: R2 secret access key (secrets.R2_SECRET_ACCESS_KEY).
+    required: true
+  endpoint:
+    description: R2 S3 endpoint URL (secrets.R2_ENDPOINT).
+    required: true
+  bucket:
+    description: R2 bucket name (secrets.R2_BUCKET) — for the config.yaml fetch.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install rclone
+      shell: bash
+      run: |
+        curl -fsSL https://rclone.org/install.sh | sudo bash
+        rclone version
+
+    - name: Configure rclone for R2
+      shell: bash
+      env:
+        R2_ACCESS_KEY_ID: ${{ inputs.access_key_id }}
+        R2_SECRET_ACCESS_KEY: ${{ inputs.secret_access_key }}
+        R2_ENDPOINT: ${{ inputs.endpoint }}
+      run: |
+        mkdir -p ~/.config/rclone
+        cat > ~/.config/rclone/rclone.conf <<EOF
+        [r2]
+        type = s3
+        provider = Cloudflare
+        access_key_id = ${R2_ACCESS_KEY_ID}
+        secret_access_key = ${R2_SECRET_ACCESS_KEY}
+        endpoint = ${R2_ENDPOINT}
+        acl = private
+        EOF
+
+    - name: Fetch WeatherBlend config.yaml from R2
+      # WB's previous-runs-refresh pushes config.yaml to r2:{bucket}/config/
+      # on every tick; src.weatherblend_config reads it at import time.
+      shell: bash
+      env:
+        R2_BUCKET: ${{ inputs.bucket }}
+      run: |
+        mkdir -p ./config
+        rclone copy "r2:${R2_BUCKET}/config/config.yaml" ./config/ --checkers 4

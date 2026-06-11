@@ -29,6 +29,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 sys.path.insert(0, str(REPO_ROOT / "tests"))
 
 from _smoke_fixtures import (  # noqa: E402
+    add_decoy_bundles,
     make_forecast_tree,
     make_manifest,
     make_rainfall_truth,
@@ -119,7 +120,9 @@ def trained_bundle(smoke_root):
     station_dir = smoke_root / "models" / "rainfall_amount" / STATION_SLUG
     versions = sorted([p for p in station_dir.iterdir() if p.is_dir()])
     assert versions, f"no 3f bundle written under {station_dir}"
-    return versions[-1]
+    real = versions[-1]
+    add_decoy_bundles(station_dir, "phase3f")
+    return real
 
 
 # --------------------------------------------------------------------------

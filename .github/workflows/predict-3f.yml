@@ -70,36 +70,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Install rclone
-        run: |
-          curl -fsSL https://rclone.org/install.sh | sudo bash
-          rclone version
-
-      - name: Configure rclone for R2
-        env:
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
-        run: |
-          mkdir -p ~/.config/rclone
-          cat > ~/.config/rclone/rclone.conf <<EOF
-          [r2]
-          type = s3
-          provider = Cloudflare
-          access_key_id = ${R2_ACCESS_KEY_ID}
-          secret_access_key = ${R2_SECRET_ACCESS_KEY}
-          endpoint = ${R2_ENDPOINT}
-          acl = private
-          EOF
-
-      - name: Fetch WeatherBlend config.yaml from R2
-        # Same R2 bus pattern as predict-4a — src.weatherblend_config
-        # reads this at import time to derive STATIONS_BY_LOCATION.
-        env:
-          R2_BUCKET: ${{ secrets.R2_BUCKET }}
-        run: |
-          mkdir -p ./config
-          rclone copy "r2:${R2_BUCKET}/config/config.yaml" ./config/ --checkers 4
+      # rclone install + R2 remote + the cross-repo config.yaml fetch —
+      # single source of truth in .github/actions/setup-r2 since 2026-06-11.
+      - uses: ./.github/actions/setup-r2
+        with:
+          access_key_id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          secret_access_key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          endpoint: ${{ secrets.R2_ENDPOINT }}
+          bucket: ${{ secrets.R2_BUCKET }}
 
       - name: Pull live forecast tree + 3f bundles + bound 3a predictions
         # Forecasts + the latest *_phase3f bundle per Membury station come

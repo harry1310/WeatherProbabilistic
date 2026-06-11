@@ -35,6 +35,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 sys.path.insert(0, str(REPO_ROOT / "tests"))
 
 from _smoke_fixtures import (  # noqa: E402
+    add_decoy_bundles,
     make_dunkeswell_midas_truth,
     make_forecast_tree,
     make_orographic_static,
@@ -129,7 +130,9 @@ def trained_bundle(smoke_root):
     bundle_parent = smoke_root / "models" / "wind_direction" / LOCATION
     versions = sorted([p for p in bundle_parent.iterdir() if p.is_dir()])
     assert versions, f"no wind_mvn bundle written under {bundle_parent}"
-    return versions[-1]
+    real = versions[-1]
+    add_decoy_bundles(bundle_parent, "wind_mvn")
+    return real
 
 
 # --------------------------------------------------------------------------

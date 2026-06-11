@@ -516,6 +516,33 @@ def _locate_bash() -> str:
     )
 
 
+def add_decoy_bundles(station_dir: Path, phase_tag: str) -> None:
+    """Sibling version dirs the predict-side bundle resolvers must SKIP —
+    the production tree shapes behind real incidents (2026-05-11 stale
+    lead-pooled 4a; the shared models/wind dir where .NET champion + python
+    challenger bundles coexist). Drop these next to a freshly-trained
+    bundle so the predict smokes exercise SELECTION, not just the happy
+    single-dir tree:
+
+      (a) a LEXICALLY NEWER foreign-phase version — a naive
+          "sort | take last" resolver would pick it;
+      (b) a lexically newer UNSUFFIXED version (the .NET champion shape);
+      (c) an OLD same-phase dir with a legacy artefact layout (for 4a the
+          lead-pooled state.rds without per-lead files — find_latest_bundle
+          must filter it on artefact shape, not name alone).
+    """
+    foreign = station_dir / "v2099-01-01_000000_phasedecoy"
+    foreign.mkdir(parents=True, exist_ok=True)
+    (foreign / "model.zip").write_text("decoy")
+    unsuffixed = station_dir / "v2099-01-02_000000"
+    unsuffixed.mkdir(parents=True, exist_ok=True)
+    (unsuffixed / "lead_24h.zip").write_text("decoy")
+    legacy = station_dir / f"v2020-01-01_000000_{phase_tag}"
+    legacy.mkdir(parents=True, exist_ok=True)
+    (legacy / "state.rds").write_text("decoy")
+    (legacy / "preprocess.json").write_text("{}")
+
+
 def run_sync_train_data(
     *,
     location: str,

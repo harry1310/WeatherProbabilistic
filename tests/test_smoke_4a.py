@@ -1,4 +1,4 @@
-"""End-to-end smoke tests for Phase 4a (per-cell BART, train + predict).
+﻿"""End-to-end smoke tests for Phase 4a (per-cell BART, train + predict).
 
 Goal: catch the wiring / typing / env-var / SQL-shape class of bugs locally
 before kicking off a real retrain. See
@@ -35,6 +35,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 sys.path.insert(0, str(REPO_ROOT / "tests"))
 
 from _smoke_fixtures import (  # noqa: E402
+    add_decoy_bundles,
     make_forecast_tree,
     make_orographic_static,
     make_rainfall_truth,
@@ -139,7 +140,11 @@ def trained_bundle(smoke_root):
     station_dir = smoke_root / "models" / "precipitation" / STATION_SLUG
     versions = sorted([p for p in station_dir.iterdir() if p.is_dir()])
     assert versions, f"no 4a bundle written under {station_dir}"
-    return versions[-1]
+    real = versions[-1]
+    # Decoy siblings AFTER resolving the real bundle: the predict smoke's
+    # find_latest_bundle must skip all three production-shaped traps.
+    add_decoy_bundles(station_dir, "phase4a")
+    return real
 
 
 # --------------------------------------------------------------------------
