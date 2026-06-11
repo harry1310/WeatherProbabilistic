@@ -113,30 +113,19 @@ jobs:
         env:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
-          MODE=predict R2_SOURCE="r2:${R2_BUCKET}" \
+          ANCHOR="${{ github.event.inputs.anchor }}"
+          # PREDICT_PULL_ANCHOR pins the predict-mode date window (anchor
+          # -14d..+6d, default today) so a retro-dated dispatch pulls ITS
+          # window, not today's.
+          MODE=predict R2_SOURCE="r2:${R2_BUCKET}" PREDICT_PULL_ANCHOR="$ANCHOR" \
             bash scripts/sync_train_data.sh membury_devon 3f
 
-          # Bound 3a predictions for today's anchor. predict_3f resolves
-          # precip_3a_version from each bundle's training_metadata, so
-          # the pull here is broad — every 3a (= unsuffixed) version
-          # dir's today partition for each Membury station. Smallest
-          # cheap pull that always contains the version we want;
-          # predict_3f errors loudly if its stamped version is missing.
-          ANCHOR_TODAY=$(date -u +%Y-%m-%d)
-          mkdir -p ../WeatherBlend/data/predictions/precipitation
-          for st in $(rclone lsf "r2:${R2_BUCKET}/data/models/rainfall_amount/" --dirs-only 2>/dev/null); do
-            st="${st%/}"
-            for v in $(rclone lsf "r2:${R2_BUCKET}/data/predictions/precipitation/${st}/" --dirs-only 2>/dev/null \
-                       | grep -v 'phase' | sort | tail -3); do
-              v="${v%/}"
-              src="r2:${R2_BUCKET}/data/predictions/precipitation/${st}/${v}/date=${ANCHOR_TODAY}"
-              dest="../WeatherBlend/data/predictions/precipitation/${st}/${v}/date=${ANCHOR_TODAY}"
-              if rclone lsf "${src}/" 2>/dev/null | grep -q predictions.parquet; then
-                rclone copy "${src}" "${dest}" --checkers 4
-                echo "3a π for ${st}: ${v}/date=${ANCHOR_TODAY}"
-              fi
-            done
-          done
+          # Bound 3a (stage-1) prediction partitions — extracted to
+          # scripts/pull_3a_predictions.sh 2026-06-11 (the last
+          # grep-in-pipeline living in workflow shell; the script runs the
+          # same logic under explicit `set -euo pipefail` with the
+          # no-match cases handled).
+          R2_SOURCE="r2:${R2_BUCKET}" bash scripts/pull_3a_predictions.sh ${ANCHOR:+"$ANCHOR"}
 
       - name: Run Phase 3f predict
         # 3 Membury stations × 5 leads = up to 15 cells to score.

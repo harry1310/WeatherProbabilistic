@@ -26,12 +26,20 @@ def _touch(p: Path) -> None:
     p.write_text("x")
 
 
+# Anchor every predict-mode call pins its pull window to. Fixture
+# partitions are dated relative to this (the production default is
+# "today", which would exclude these absolute-dated fixtures).
+ANCHOR = "2026-01-02"
+
+
 def _fake_r2_precip(root: Path) -> Path:
     """fake-R2 with the trees a precip phase reads + two phase4a bundle
-    versions (to prove 'latest' selection) + a promote MANIFEST."""
+    versions (to prove 'latest' selection) + a promote MANIFEST. Rainfall
+    uses the REAL production tree shape (location=/station=/date= — the
+    flat fixture pre-2026-06-11 couldn't catch window/scoping bugs)."""
     d = root / "data"
     _touch(d / "forecasts/location=bonehill_rocks/model=gfs_seamless/date=2026-01-01/run=00.parquet")
-    _touch(d / "truth/rainfall/ea_bellever_dartmoor/r.parquet")
+    _touch(d / "truth/rainfall/location=bonehill_rocks/station=Bellever Dartmoor/date=2026-01-01/rainfall.parquet")
     _touch(d / "static/orographic/ea_bellever_dartmoor.json")
     _touch(d / "models/precipitation/ea_bellever_dartmoor/v2025-01-01_phase4a/state.rds")
     _touch(d / "models/precipitation/ea_bellever_dartmoor/v2026-05-01_phase4a/state.rds")  # newest
@@ -47,7 +55,8 @@ def test_predict_mode_pulls_features_and_latest_bundle_no_manifest(tmp_path):
     fake_r2 = _fake_r2_precip(tmp_path / "r2")
     dest = tmp_path / "dest"
     run_sync_train_data(location="bonehill_rocks", phases="4a",
-                        r2_source=fake_r2, local_root=dest, mode="predict")
+                        r2_source=fake_r2, local_root=dest, mode="predict",
+                        predict_pull_anchor=ANCHOR)
     f = _files(dest)
     # The rich-oro builder's feature trees — all three were the 2026-05-31 gaps.
     assert any(s.startswith("forecasts/") for s in f), f
@@ -57,6 +66,42 @@ def test_predict_mode_pulls_features_and_latest_bundle_no_manifest(tmp_path):
     assert any("v2026-05-01_phase4a/state.rds" in s for s in f), f
     # Predict must NOT pull the promote-target MANIFEST (train-only).
     assert not any(s.endswith("precipitation/MANIFEST.json") for s in f), f
+
+
+def test_predict_mode_window_excludes_old_partitions_train_keeps_them(tmp_path):
+    """Regression for the 2026-06-11 over-pull fix: predict-mode pulls only
+    [anchor-14d, anchor+6d] of date= partitions (the full-history pull was
+    3-5 min of the 41k-file forecast tree per predict workflow per cycle);
+    train mode still pulls everything. Out-of-window forecast AND rainfall
+    partitions pin both trees' filters; an in-window forward (valid-dated)
+    partition pins the +6d headroom."""
+    root = tmp_path / "r2"; d = root / "data"
+    # In-window (anchor 2026-01-02): -1d, +5d. Out-of-window: -60d.
+    _touch(d / "forecasts/location=bonehill_rocks/model=gfs_seamless/date=2026-01-01/run=00.parquet")
+    _touch(d / "forecasts/location=bonehill_rocks/model=gfs_seamless/date=2026-01-07/run=00.parquet")
+    _touch(d / "forecasts/location=bonehill_rocks/model=gfs_seamless/date=2025-11-03/run=00.parquet")
+    _touch(d / "truth/rainfall/location=bonehill_rocks/station=Bellever Dartmoor/date=2026-01-01/rainfall.parquet")
+    _touch(d / "truth/rainfall/location=bonehill_rocks/station=Bellever Dartmoor/date=2025-11-03/rainfall.parquet")
+    _touch(d / "static/orographic/ea_bellever_dartmoor.json")
+    _touch(d / "models/precipitation/ea_bellever_dartmoor/v2026-05-01_phase4a/state.rds")
+    dest = tmp_path / "dest"
+    run_sync_train_data(location="bonehill_rocks", phases="4a",
+                        r2_source=root, local_root=dest, mode="predict",
+                        predict_pull_anchor=ANCHOR)
+    f = _files(dest)
+    assert any("date=2026-01-01" in s and s.startswith("forecasts/") for s in f), f
+    assert any("date=2026-01-07" in s for s in f), f                  # +5d headroom
+    assert not any("date=2025-11-03" in s for s in f), f              # out of window, BOTH trees
+    assert any("date=2026-01-01" in s and "rainfall" in s for s in f), f
+
+    # Train mode: full history, both trees.
+    dest_train = tmp_path / "dest_train"
+    _touch(d / "models/precipitation/MANIFEST.json")
+    run_sync_train_data(location="bonehill_rocks", phases="4a",
+                        r2_source=root, local_root=dest_train, mode="train")
+    ft = _files(dest_train)
+    assert any("date=2025-11-03" in s and s.startswith("forecasts/") for s in ft), ft
+    assert any("date=2025-11-03" in s and "rainfall" in s for s in ft), ft
 
 
 def test_train_mode_pulls_manifest_not_bundle(tmp_path):
@@ -81,7 +126,7 @@ def test_predict_mode_wind_mvn_pulls_bundle_and_orographic(tmp_path):
     _touch(d / "truth/midas/raw/midas-open_x_01383_y.csv")
     dest = tmp_path / "dest"
     run_sync_train_data(location="bonehill_rocks", phases="wind_mvn",
-                        r2_source=root, local_root=dest, mode="predict")
+                        r2_source=root, local_root=dest, mode="predict", predict_pull_anchor=ANCHOR)
     f = _files(dest)
     assert any("v2026-05-01_wind_mvn/model.pt" in s for s in f), f
     assert any(s.startswith("static/orographic/") for s in f), f
@@ -105,7 +150,7 @@ def test_predict_mode_wind_speed_lgb_pulls_latest_lgb_bundle_only(tmp_path):
     _touch(d / "truth/midas/raw/midas-open_x_01383_y.csv")
     dest = tmp_path / "dest"
     run_sync_train_data(location="bonehill_rocks", phases="wind_mvn,wind_speed_lgb",
-                        r2_source=root, local_root=dest, mode="predict")
+                        r2_source=root, local_root=dest, mode="predict", predict_pull_anchor=ANCHOR)
     f = _files(dest)
     assert any("v2026-06-01_120000_wind_speed_lgb/q_med_lead_24h.txt" in s for s in f), f
     assert not any("v2026-05-01_120000_wind_speed_lgb" in s for s in f), f
@@ -123,14 +168,14 @@ def test_predict_mode_survives_cells_without_the_phase(tmp_path):
     placed both before and after the real one pin skip-and-continue."""
     root = tmp_path / "r2"; d = root / "data"
     _touch(d / "forecasts/location=bonehill_rocks/model=gfs_seamless/date=2026-01-01/run=00.parquet")
-    _touch(d / "truth/rainfall/ea_bellever_dartmoor/r.parquet")
+    _touch(d / "truth/rainfall/location=bonehill_rocks/station=Bellever Dartmoor/date=2026-01-01/rainfall.parquet")
     _touch(d / "static/orographic/ea_bellever_dartmoor.json")
     _touch(d / "models/precipitation/ea_aaa_membury_no_4a/v2026-05-01_phase3c/model.zip")
     _touch(d / "models/precipitation/ea_bellever_dartmoor/v2026-05-01_phase4a/state.rds")
     _touch(d / "models/precipitation/ea_zzz_sennen_no_4a/v2026-05-01_phase3c/model.zip")
     dest = tmp_path / "dest"
     run_sync_train_data(location="bonehill_rocks", phases="4a",
-                        r2_source=root, local_root=dest, mode="predict")
+                        r2_source=root, local_root=dest, mode="predict", predict_pull_anchor=ANCHOR)
     f = _files(dest)
     assert any("ea_bellever_dartmoor/v2026-05-01_phase4a/state.rds" in s for s in f), f
     assert not any("ea_aaa_membury_no_4a" in s for s in f), f
@@ -153,3 +198,4 @@ def test_train_mode_wind_speed_lgb_pulls_wind_manifest_and_midas(tmp_path):
     assert any(s.endswith("models/wind/MANIFEST.json") for s in f), f
     assert any(s.startswith("truth/midas/") for s in f), f
     assert not any("_wind_speed_lgb/q_med_lead_24h.txt" in s for s in f), f
+

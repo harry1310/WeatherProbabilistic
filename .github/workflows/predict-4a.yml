@@ -125,7 +125,10 @@ jobs:
         env:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
+          # PREDICT_PULL_ANCHOR pins the predict-mode date window (anchor
+          # -14d..+6d, default today) for retro-dated dispatches.
           MODE=predict R2_SOURCE="r2:${R2_BUCKET}" \
+            PREDICT_PULL_ANCHOR="${{ github.event.inputs.anchor }}" \
             bash scripts/sync_train_data.sh bonehill_rocks 4a
 
       - name: Run Phase 4a state-load + predict

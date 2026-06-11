@@ -64,6 +64,36 @@ case "$MODE" in
   *) echo "::error::MODE must be 'train' or 'predict' (got '$MODE')"; exit 2 ;;
 esac
 
+# ---------------------------------------------------------------------------
+# Predict-mode recent-window pull (2026-06-11). Train pulls FULL history (it
+# genuinely consumes it); predict was pulling the same and spending 3-5 min
+# per workflow per cycle listing+copying ~41k tiny parquets it never reads
+# (predict-4a 306s / predict-3f 191s / predict-wind 160s of pull for 10-36s
+# of actual predicting). Predict needs only a recent slice: live forecast
+# rows from the last few days of cycles + antecedent EA rain for the
+# persistence features.
+#
+# Window: [anchor-14d, anchor+6d] of date= partitions. -14d covers every
+# live-cycle lookback + the rolling previous-runs refresh; +6d covers trees
+# whose date= key is the VALID day (rows out to lead 120h+headroom).
+# PREDICT_PULL_ANCHOR (ISO date) defaults to today — workflows pass their
+# anchor input through so a retro-dated predict still pulls ITS window;
+# the smoke fixtures pin it to their fixed anchors.
+RECENT_INCLUDES=""
+if [ "$MODE" = "predict" ]; then
+  PREDICT_PULL_ANCHOR="${PREDICT_PULL_ANCHOR:-$(date -u +%F)}"
+  for off in $(seq -14 6); do
+    d=$(date -ud "$PREDICT_PULL_ANCHOR $off days" +%F)
+    # ROOTED include (leading /): the forecast pulls copy per-model trees
+    # whose date= dirs sit AT the copy root, and rclone's '**/x' needs at
+    # least one parent segment (the 2026-06-10 predict-wind 0-file push).
+    # For the rainfall pull (station=*/date=*) the rooted form is widened
+    # below at the call site.
+    RECENT_INCLUDES="$RECENT_INCLUDES --include /date=$d/** --include /station=*/date=$d/**"
+  done
+  echo "sync_train_data: predict-mode window $PREDICT_PULL_ANCHOR -14d..+6d"
+fi
+
 mkdir -p "$LOCAL_ROOT"
 cd "$LOCAL_ROOT"
 
@@ -181,20 +211,38 @@ if [ "$need_forecasts" -gt 0 ]; then
   for m in "${PYTHON_NWP_MODELS[@]}"; do
     echo "::group::sync_train_data: pull forecasts/location=$location/model=$m"
     mkdir -p "forecasts/location=$location/model=$m"
+    # $RECENT_INCLUDES is empty in train mode (full history) and the
+    # predict-mode date window otherwise — word-splitting is intentional.
     rclone copy "${R2_SOURCE%/}/data/forecasts/location=$location/model=$m" \
       "forecasts/location=$location/model=$m" \
-      --fast-list --transfers 16 --checkers 32 --s3-no-check-bucket \
+      --fast-list --transfers 16 --checkers 32 --s3-no-check-bucket $RECENT_INCLUDES \
       || echo "::warning::no rows for model=$m at location=$location (may be expected on first runs)"
     echo "::endgroup::"
   done
 fi
 
 if [ "$need_rainfall" -gt 0 ]; then
-  echo "::group::sync_train_data: pull truth/rainfall"
-  mkdir -p truth/rainfall
-  rclone copy "${R2_SOURCE%/}/data/truth/rainfall" truth/rainfall \
-    --fast-list --transfers 16 --checkers 32 --s3-no-check-bucket
-  echo "::endgroup::"
+  if [ "$MODE" = "predict" ]; then
+    # Predict only needs the antecedent-rain persistence window for THIS
+    # location's gauges (the full tree is every location's 15-min history
+    # back to the EA backfill — ~14k files predict never reads).
+    echo "::group::sync_train_data: pull truth/rainfall (location=$location, predict window)"
+    mkdir -p "truth/rainfall/location=$location"
+    # Soft-fail like the per-model forecast pulls: a location with no
+    # rainfall tree yet (fresh onboarding, pre-backfill) must not kill
+    # the sync — the predictor degrades its persistence features instead.
+    rclone copy "${R2_SOURCE%/}/data/truth/rainfall/location=$location" \
+      "truth/rainfall/location=$location" \
+      --fast-list --transfers 16 --checkers 32 --s3-no-check-bucket $RECENT_INCLUDES \
+      || echo "::warning::no rainfall tree for location=$location (may be expected pre-backfill)"
+    echo "::endgroup::"
+  else
+    echo "::group::sync_train_data: pull truth/rainfall"
+    mkdir -p truth/rainfall
+    rclone copy "${R2_SOURCE%/}/data/truth/rainfall" truth/rainfall \
+      --fast-list --transfers 16 --checkers 32 --s3-no-check-bucket
+    echo "::endgroup::"
+  fi
 fi
 
 if [ "$need_midas" -gt 0 ]; then

@@ -126,7 +126,10 @@ jobs:
         run: |
           LOC="${{ github.event.inputs.location }}"
           [ -z "$LOC" ] && LOC="bonehill_rocks"
+          # PREDICT_PULL_ANCHOR pins the predict-mode date window (anchor
+          # -14d..+6d, default today) for retro-dated dispatches.
           MODE=predict R2_SOURCE="r2:${R2_BUCKET}" \
+            PREDICT_PULL_ANCHOR="${{ github.event.inputs.anchor }}" \
             bash scripts/sync_train_data.sh "$LOC" wind_mvn,wind_speed_lgb
 
       - name: Run wind_mvn predict

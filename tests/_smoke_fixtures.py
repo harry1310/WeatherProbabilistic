@@ -523,6 +523,7 @@ def run_sync_train_data(
     r2_source: Path,
     local_root: Path,
     mode: str = "train",
+    predict_pull_anchor: str | None = None,
 ) -> None:
     """Invoke ``scripts/sync_train_data.sh`` against a local fake-R2 dir.
 
@@ -554,6 +555,12 @@ def run_sync_train_data(
     env["R2_SOURCE"] = str(r2_source)
     env["LOCAL_ROOT"] = str(local_root)
     env["MODE"] = mode
+    # Predict-mode pulls a [anchor-14d, anchor+6d] date-partition window
+    # (2026-06-11). Fixtures use ABSOLUTE dates, so predict-mode tests must
+    # pin the window to their fixture anchor — wall-clock default would
+    # exclude every fixture partition.
+    if predict_pull_anchor is not None:
+        env["PREDICT_PULL_ANCHOR"] = predict_pull_anchor
     bash_exe = _locate_bash()
     result = subprocess.run(
         [bash_exe, str(SYNC_SCRIPT), location, phases],
