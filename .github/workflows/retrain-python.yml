@@ -72,7 +72,10 @@ jobs:
       max-parallel: 1
       fail-fast: false
       matrix:
-        location: [bonehill_rocks, membury_devon]
+        # sennen_cove added 2026-06-11 with wave_height_lgb (the first
+        # Sennen python phase). Phases admit locations via phases.yaml's
+        # locations: filter, so the Bonehill/Membury jobs no-op on it.
+        location: [bonehill_rocks, membury_devon, sennen_cove]
     steps:
       - uses: actions/checkout@v4
 
@@ -217,7 +220,7 @@ jobs:
           done
 
           # run_<id> = requested AND admitted by this matrix location.
-          run_4a=false; run_3f=false; run_wind_mvn=false; run_wind_speed_lgb=false
+          run_4a=false; run_3f=false; run_wind_mvn=false; run_wind_speed_lgb=false; run_wave_height_lgb=false
           for row in "${PHASE_ROWS[@]}"; do
             id="${row%%|*}"
             locs="${row#*|}"
@@ -235,6 +238,7 @@ jobs:
                 3f) run_3f=true ;;
                 wind_mvn) run_wind_mvn=true ;;
                 wind_speed_lgb) run_wind_speed_lgb=true ;;
+                wave_height_lgb) run_wave_height_lgb=true ;;
                 *) echo "::warning::phases.yaml impl=python phase '$id' has no Train step wired in retrain-python.yml — add run_${id} + a Train step." ;;
               esac
             fi
@@ -243,7 +247,8 @@ jobs:
           echo "run_3f=$run_3f" >> "$GITHUB_OUTPUT"
           echo "run_wind_mvn=$run_wind_mvn" >> "$GITHUB_OUTPUT"
           echo "run_wind_speed_lgb=$run_wind_speed_lgb" >> "$GITHUB_OUTPUT"
-          echo "Resolved: run_4a=$run_4a run_3f=$run_3f run_wind_mvn=$run_wind_mvn run_wind_speed_lgb=$run_wind_speed_lgb"
+          echo "run_wave_height_lgb=$run_wave_height_lgb" >> "$GITHUB_OUTPUT"
+          echo "Resolved: run_4a=$run_4a run_3f=$run_3f run_wind_mvn=$run_wind_mvn run_wind_speed_lgb=$run_wind_speed_lgb run_wave_height_lgb=$run_wave_height_lgb"
 
           # CSV of resolved phases — consumed by scripts/sync_train_data.sh
           # so the per-phase pull declarations are the same source of truth
@@ -253,6 +258,7 @@ jobs:
           [ "$run_3f"             = "true" ] && RESOLVED_CSV="${RESOLVED_CSV:+$RESOLVED_CSV,}3f"
           [ "$run_wind_mvn"       = "true" ] && RESOLVED_CSV="${RESOLVED_CSV:+$RESOLVED_CSV,}wind_mvn"
           [ "$run_wind_speed_lgb" = "true" ] && RESOLVED_CSV="${RESOLVED_CSV:+$RESOLVED_CSV,}wind_speed_lgb"
+          [ "$run_wave_height_lgb" = "true" ] && RESOLVED_CSV="${RESOLVED_CSV:+$RESOLVED_CSV,}wave_height_lgb"
           echo "phases_resolved_csv=$RESOLVED_CSV" >> "$GITHUB_OUTPUT"
           echo "phases_resolved_csv='$RESOLVED_CSV'"
 
@@ -397,6 +403,23 @@ jobs:
         run: |
           python -u scripts/train_wind_speed_pi.py --location ${{ matrix.location }} --conformal crossconf
 
+      - name: Train wave_height_lgb (quantile-LGB + split-CQR, any-lead v1)
+        # 1 location × 3 heads on ~39k rows — minutes, not hours. Trains on
+        # the lead-unlabelled marine hindcast vs era5_ocean truth (per-lead
+        # wave history only started accruing 2026-06-11; see the module
+        # docstring for the v1 caveats + the ~2026-09 per-lead plan).
+        id: train_wave_height_lgb
+        if: steps.gate.outputs.proceed == 'true' && steps.phases.outputs.run_wave_height_lgb == 'true'
+        continue-on-error: true
+        env:
+          WEATHERBLEND_DATA_ROOT: ${{ github.workspace }}/../WeatherBlend/data
+          WB_LOCATION: ${{ matrix.location }}
+        run: |
+          ANCHOR="${{ inputs.anchor }}"
+          ARGS=""
+          if [ -n "$ANCHOR" ]; then ARGS="--anchor $ANCHOR"; fi
+          python -u scripts/train_wave_pi.py --location ${{ matrix.location }} $ARGS
+
       # ----- R2 auto-push ------------------------------------------------
       # R2 sync is incremental, gated on each train step's success (the
       # guard exited 4 if data drifted, in which case write_bundle never
@@ -464,6 +487,20 @@ jobs:
             --fast-list --transfers 16 --checkers 32 --s3-no-check-bucket \
             --include "**/*wind_speed_lgb*/**"
 
+      - name: Push wave_height bundles to R2
+        # train_wave_pi.py writes point/q_lo/q_hi boosters + schema +
+        # calibration + metadata + training_summary under
+        # ../WeatherBlend/data/models/wave_height/{location}/v..._wave_height_lgb/.
+        # Fresh prefix on first push — --s3-no-check-bucket as ever.
+        if: steps.phases.outputs.run_wave_height_lgb == 'true' && steps.train_wave_height_lgb.outcome == 'success'
+        env:
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          rclone copy ../WeatherBlend/data/models/wave_height \
+            "r2:${R2_BUCKET}/data/models/wave_height" \
+            --fast-list --transfers 16 --checkers 32 --s3-no-check-bucket \
+            --include "**/*wave_height_lgb*/**"
+
       - name: Push MANIFEST.json to R2
         # train_4a.py + train_3f.py + train_wind_mvn.py all promote the
         # freshly-trained version into the local MANIFEST.json's Active
@@ -474,7 +511,7 @@ jobs:
         # target's root) wouldn't be picked up by either. This step does
         # the explicit manifest push for each target tree any phase
         # promoted into.
-        if: (steps.phases.outputs.run_4a == 'true' && steps.train_4a.outcome == 'success') || (steps.phases.outputs.run_3f == 'true' && steps.train_3f.outcome == 'success') || (steps.phases.outputs.run_wind_mvn == 'true' && steps.train_wind_mvn.outcome == 'success') || (steps.phases.outputs.run_wind_speed_lgb == 'true' && steps.train_wind_speed_lgb.outcome == 'success')
+        if: (steps.phases.outputs.run_4a == 'true' && steps.train_4a.outcome == 'success') || (steps.phases.outputs.run_3f == 'true' && steps.train_3f.outcome == 'success') || (steps.phases.outputs.run_wind_mvn == 'true' && steps.train_wind_mvn.outcome == 'success') || (steps.phases.outputs.run_wind_speed_lgb == 'true' && steps.train_wind_speed_lgb.outcome == 'success') || (steps.phases.outputs.run_wave_height_lgb == 'true' && steps.train_wave_height_lgb.outcome == 'success')
         env:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
@@ -504,6 +541,12 @@ jobs:
               --s3-no-check-bucket
             echo "Pushed wind/MANIFEST.json to R2."
           fi
+          if [ -f ../WeatherBlend/data/models/wave_height/MANIFEST.json ]; then
+            rclone copyto ../WeatherBlend/data/models/wave_height/MANIFEST.json \
+              "r2:${R2_BUCKET}/data/models/wave_height/MANIFEST.json" \
+              --s3-no-check-bucket
+            echo "Pushed wave_height/MANIFEST.json to R2."
+          fi
 
       - name: Aggregate retrain results
         # The train steps are continue-on-error so the push steps can
@@ -517,6 +560,7 @@ jobs:
           if [ "${{ steps.train_3f.outcome }}" = "failure" ]; then failed+=("3f"); fi
           if [ "${{ steps.train_wind_mvn.outcome }}" = "failure" ]; then failed+=("wind_mvn"); fi
           if [ "${{ steps.train_wind_speed_lgb.outcome }}" = "failure" ]; then failed+=("wind_speed_lgb"); fi
+          if [ "${{ steps.train_wave_height_lgb.outcome }}" = "failure" ]; then failed+=("wave_height_lgb"); fi
           if [ ${#failed[@]} -gt 0 ]; then
             echo "::error::Retrain failed for phase(s): ${failed[*]}. Passing phases were still pushed to R2 — inspect each failed phase's log above."
             exit 1

@@ -89,7 +89,9 @@ if [ "$MODE" = "predict" ]; then
     # least one parent segment (the 2026-06-10 predict-wind 0-file push).
     # For the rainfall pull (station=*/date=*) the rooted form is widened
     # below at the call site.
-    RECENT_INCLUDES="$RECENT_INCLUDES --include /date=$d/** --include /station=*/date=$d/**"
+    # /model=*/date= covers the marine tree (pulled at its location root,
+    # so the date dirs sit one model= segment down).
+    RECENT_INCLUDES="$RECENT_INCLUDES --include /date=$d/** --include /station=*/date=$d/** --include /model=*/date=$d/**"
   done
   echo "sync_train_data: predict-mode window $PREDICT_PULL_ANCHOR -14d..+6d"
 fi
@@ -113,16 +115,20 @@ need_forecasts=0
 need_rainfall=0
 need_midas=0
 need_orographic=0
+need_marine=0
+need_waves_truth=0
 need_precip_manifest=0
 need_rainfall_amount_manifest=0
 need_wind_direction_manifest=0
 need_wind_manifest=0
+need_wave_height_manifest=0
 # Predict-mode: name the model-bundle tree (target) + phase-version glob to
 # pull the latest bundle per cell for. Empty = no bundle pull.
 bundle_precipitation=""
 bundle_rainfall_amount=""
 bundle_wind_direction=""
 bundle_wind=""
+bundle_wave_height=""
 
 IFS=',' read -ra phases <<< "$phases_csv"
 for p in "${phases[@]}"; do
@@ -179,6 +185,16 @@ for p in "${phases[@]}"; do
       need_forecasts=1; need_orographic=1
       if [ "$MODE" = "train" ]; then need_midas=1; need_wind_manifest=1
       else bundle_wind="wind_speed_lgb"; fi ;;
+
+    # wave_height_lgb (quantile-LGB + split-CQR Hs blender at the pinned
+    # marine cell — Sennen sea-state Phase 2, 2026-06-11). Marine tree at
+    # BOTH modes (train reads hist_forecast.parquet, predict reads the live
+    # run=HH files). Train: era5_ocean wave truth (label) + the wave_height
+    # MANIFEST. Predict: the latest *_wave_height_lgb bundle.
+    wave_height_lgb)
+      need_marine=1
+      if [ "$MODE" = "train" ]; then need_waves_truth=1; need_wave_height_manifest=1
+      else bundle_wave_height="wave_height_lgb"; fi ;;
 
     *)
       echo "::error::sync_train_data: unknown python phase '$p' — add it to scripts/sync_train_data.sh."
@@ -245,6 +261,31 @@ if [ "$need_rainfall" -gt 0 ]; then
   fi
 fi
 
+# Marine (wave) forecast tree — pulled at the location root, all models.
+# Train mode = full history; predict mode = the recent date window via the
+# /model=*/date= include shape above.
+if [ "$need_marine" -gt 0 ]; then
+  echo "::group::sync_train_data: pull marine/location=$location"
+  mkdir -p "marine/location=$location"
+  rclone copy "${R2_SOURCE%/}/data/marine/location=$location" \
+    "marine/location=$location" \
+    --fast-list --transfers 16 --checkers 32 --s3-no-check-bucket $RECENT_INCLUDES \
+    || echo "::warning::no marine tree for location=$location (may be expected on first runs)"
+  echo "::endgroup::"
+fi
+
+# era5_ocean wave truth (train label). Buoy sources under the same tree are
+# verification-only — not pulled here.
+if [ "$need_waves_truth" -gt 0 ]; then
+  echo "::group::sync_train_data: pull truth/waves/location=$location (era5_ocean)"
+  mkdir -p "truth/waves/location=$location"
+  rclone copy "${R2_SOURCE%/}/data/truth/waves/location=$location" \
+    "truth/waves/location=$location" \
+    --include '/source=era5_ocean/**' \
+    --fast-list --transfers 16 --checkers 32 --s3-no-check-bucket
+  echo "::endgroup::"
+fi
+
 if [ "$need_midas" -gt 0 ]; then
   echo "::group::sync_train_data: pull truth/midas/raw"
   mkdir -p truth/midas/raw
@@ -287,6 +328,9 @@ fi
 if [ "$need_wind_manifest" -gt 0 ]; then
   copyto_manifest "wind"
 fi
+if [ "$need_wave_height_manifest" -gt 0 ]; then
+  copyto_manifest "wave_height"
+fi
 
 # Predict-mode model bundles. Pull the LATEST bundle matching the phase-version
 # glob per cell (station or location) under models/<target>/. Mirrors the
@@ -323,6 +367,7 @@ pull_latest_bundle() {
 [ -n "$bundle_rainfall_amount" ]  && pull_latest_bundle "rainfall_amount"  "$bundle_rainfall_amount"
 [ -n "$bundle_wind_direction" ]   && pull_latest_bundle "wind_direction"   "$bundle_wind_direction"
 [ -n "$bundle_wind" ]             && pull_latest_bundle "wind"             "$bundle_wind"
+[ -n "$bundle_wave_height" ]      && pull_latest_bundle "wave_height"      "$bundle_wave_height"
 
 echo "sync_train_data: done (mode=$MODE)."
 echo "  forecasts=$need_forecasts rainfall=$need_rainfall midas=$need_midas orographic=$need_orographic"

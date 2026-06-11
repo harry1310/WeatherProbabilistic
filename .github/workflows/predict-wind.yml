@@ -146,6 +146,33 @@ jobs:
           if [ -n "$ANCHOR" ]; then ARGS="$ARGS --anchor $ANCHOR"; fi
           python -u scripts/predict_wind_speed_pi.py $ARGS
 
+      # ----- Sennen wave_height (Sea state) — rides this job (2026-06-11) -----
+      # Same Hop C timing is exactly what waves need (fires right after
+      # collect lands fresh marine rows), so the wave predict shares this
+      # runner rather than costing a Cloudflare worker change tonight.
+      # Splitting into its own predict-waves hop is a flagged cleanup.
+      - name: Pull Sennen wave predict data (sync_train_data.sh MODE=predict)
+        continue-on-error: true
+        env:
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          MODE=predict R2_SOURCE="r2:${R2_BUCKET}" \
+            PREDICT_PULL_ANCHOR="${{ github.event.inputs.anchor }}" \
+            bash scripts/sync_train_data.sh "sennen_cove" wave_height_lgb
+
+      - name: Run wave_height_lgb predict (Sennen)
+        # Soft-fail contract matches the wind steps: no *_wave_height_lgb
+        # bundle on R2 yet → exit 3, masked; the push guard below skips.
+        continue-on-error: true
+        env:
+          WEATHERBLEND_DATA_ROOT: ${{ github.workspace }}/../WeatherBlend/data
+          WB_LOCATION: sennen_cove
+        run: |
+          ANCHOR="${{ github.event.inputs.anchor }}"
+          ARGS="--location sennen_cove"
+          if [ -n "$ANCHOR" ]; then ARGS="$ARGS --anchor $ANCHOR"; fi
+          python -u scripts/predict_wave_pi.py $ARGS
+
       - name: Push predictions to R2
         # wind_direction is a fresh prefix on first push — --s3-no-check-bucket
         # avoids the IAM-token CreateBucket gotcha.
@@ -190,6 +217,18 @@ jobs:
               --fast-list --transfers 16 --checkers 32 --progress --s3-no-check-bucket
           else
             echo "::notice::No wind_speed_lgb predictions produced this cycle (likely no *_wind_speed_lgb bundle on R2 yet) — skipping R2 push."
+          fi
+
+          # wave_height (Sennen sea-state): model_version= dirs at the copy
+          # root → ROOTED include, same gotcha as wind_speed_lgb above.
+          WAVE_ROOT=../WeatherBlend/data/predictions/wave_height
+          if [ -d "$WAVE_ROOT" ] && [ -n "$(find "$WAVE_ROOT" -name '*.parquet' -print -quit 2>/dev/null)" ]; then
+            rclone copy "$WAVE_ROOT" \
+              "r2:${R2_BUCKET}/data/predictions/wave_height" \
+              --include '/model_version=*wave_height_lgb*/**' \
+              --fast-list --transfers 16 --checkers 32 --progress --s3-no-check-bucket
+          else
+            echo "::notice::No wave_height predictions produced this cycle (likely no *_wave_height_lgb bundle on R2 yet) — skipping R2 push."
           fi
 
       - name: Upload logs as artifact
