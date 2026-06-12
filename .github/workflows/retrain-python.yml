@@ -368,11 +368,13 @@ jobs:
       - name: Train wind_mvn (PyTorch MLP bivariate-normal)
         # 1 location × 3 leads = 3 MLP fits per run. Per-cell wall is
         # ~1-3 min (300-epoch cap, early-stop typically around epoch
-        # 110-150). Total ~5-10 min. Bonehill-only initially (Membury
-        # Dunkeswell paired rows not yet validated — plan open item #4).
-        # phases.yaml's wind_direction/wind_mvn locations: ["bonehill_rocks"]
-        # filter means the Membury matrix job resolves run_wind_mvn=false
-        # and this step skips entirely for that job.
+        # 110-150). Total ~5-10 min per location. Locations come from
+        # phases.yaml's wind_direction/wind_mvn locations: filter
+        # (bonehill_rocks + sennen_cove since 2026-06-12; Membury still
+        # resolves run_wind_mvn=false and skips). Truth is per-location
+        # inside the trainer (Dunkeswell MIDAS vs Sennen ERA5 cell — see
+        # train_wind_mvn.TRUTH_SOURCE_BY_LOCATION); the sync pull above
+        # follows the same split.
         id: train_wind_mvn
         if: steps.gate.outputs.proceed == 'true' && steps.phases.outputs.run_wind_mvn == 'true'
         # continue-on-error so a wind_mvn failure doesn't strand 4a / 3f

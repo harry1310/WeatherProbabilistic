@@ -12,10 +12,15 @@ mutually uncorrelated across NWPs, so the MLP cannot converge to a
 meaningful NLL — but the bundle layout, calibration scalars, manifest
 promotion, and predict output schema all still get exercised.
 
-wind_mvn is bonehill-only per ``phases.yaml``
-(``wind_direction.wind_mvn.locations = [bonehill_rocks]``), so the
-fixture trains a bonehill bundle. Truth is Dunkeswell SYNOP via a
-fake MIDAS BADC-CSV file at ``data/truth/midas/raw/``.
+wind_mvn covers bonehill_rocks + sennen_cove per ``phases.yaml``
+(sennen added 2026-06-12). Truth is per-location
+(``train_wind_mvn.TRUTH_SOURCE_BY_LOCATION``):
+
+  - bonehill: Dunkeswell SYNOP via a fake MIDAS BADC-CSV file at
+    ``data/truth/midas/raw/`` — the main train + predict smokes below.
+  - sennen: the ERA5 cell tree at ``data/truth/era5/location=sennen_cove/``
+    — the Sennen train smoke at the bottom exercises that loader AND the
+    sennen-specific sync_train_data.sh pull declaration (era5, no MIDAS).
 """
 from __future__ import annotations
 
@@ -37,6 +42,7 @@ sys.path.insert(0, str(REPO_ROOT / "tests"))
 from _smoke_fixtures import (  # noqa: E402
     add_decoy_bundles,
     make_dunkeswell_midas_truth,
+    make_era5_wind_truth,
     make_forecast_tree,
     make_orographic_static,
     run_sync_train_data,
@@ -358,3 +364,135 @@ class TestPredictWindMvnSmoke:
         )
         # Direction must wrap into [0, 360).
         assert ((out["BlendDirection"] >= 0) & (out["BlendDirection"] < 360)).all()
+
+
+# --------------------------------------------------------------------------
+# Sennen train smoke — ERA5 truth path (2026-06-12)
+# --------------------------------------------------------------------------
+
+SENNEN = "sennen_cove"
+# One lead is enough to exercise everything sennen-specific (the ERA5
+# loader + sync declaration + per-location DataSource stamp); the 3-lead
+# bundle mechanics are already pinned by the bonehill smoke above, and a
+# second 3-lead train would triple this smoke's wall time for no new
+# coverage.
+SENNEN_LEADS = (24,)
+
+
+@pytest.fixture
+def sennen_smoke_root(tmp_path, monkeypatch):
+    monkeypatch.setenv("WEATHERBLEND_DATA_ROOT", str(tmp_path))
+    monkeypatch.setenv("WB_LOCATION", SENNEN)
+    import src.data
+    importlib.reload(src.data)
+    return tmp_path
+
+
+@pytest.fixture
+def sennen_trained_bundle(sennen_smoke_root):
+    """Sennen fixtures land in a fake-R2 dir; run_sync_train_data invokes
+    the REAL production sync script with the sennen location, so the
+    era5-not-midas truth-pull declaration is exercised end-to-end (a
+    missing/wrong declaration fails here, not in a Sunday retrain).
+    No MIDAS fixture is written — the bonehill branch of the declaration
+    would fail loudly on the missing tree if the location split regressed."""
+    smoke_root = sennen_smoke_root
+    fake_r2 = smoke_root / "fake-r2"
+    fake_r2_data = fake_r2 / "data"
+    make_forecast_tree(
+        fake_r2_data, SENNEN, TRAIN_START, n_days=TRAIN_DAYS,
+        run_time_source="offset_day",
+    )
+    make_era5_wind_truth(
+        fake_r2_data, SENNEN, TRAIN_START, n_days=TRAIN_DAYS + 10,
+    )
+    # Neutral orography — mirrors the hand-authored production
+    # sennen_cove.json for the exposed clifftop (zero gradients + zero
+    # upwind gain; only oro_wind_sin/cos carry signal).
+    make_orographic_static(
+        fake_r2_data, SENNEN,
+        terrain_gradient_dx=0.0, terrain_gradient_dy=0.0,
+        upwind_gain_5km={s: 0.0 for s in ("N", "NE", "E", "SE", "S", "SW", "W", "NW")},
+    )
+    run_sync_train_data(
+        location=SENNEN, phases="wind_mvn",
+        r2_source=fake_r2, local_root=smoke_root,
+    )
+    # The sync must have pulled the ERA5 truth tree and must NOT have
+    # pulled MIDAS (train-only label for the OTHER location's truth).
+    assert (smoke_root / "truth" / "era5" / f"location={SENNEN}").is_dir(), \
+        "sync_train_data.sh did not pull truth/era5 for sennen wind_mvn"
+    assert not (smoke_root / "truth" / "midas").exists(), \
+        "sync_train_data.sh pulled MIDAS for sennen wind_mvn — truth split regressed"
+
+    import train_wind_mvn
+    importlib.reload(train_wind_mvn)
+    sys_argv = sys.argv
+    try:
+        sys.argv = [
+            "train_wind_mvn",
+            "--location", SENNEN,
+            "--leads", *(str(l) for l in SENNEN_LEADS),
+            "--models-root", str(smoke_root / "models"),
+        ]
+        try:
+            train_wind_mvn.main()
+        except SystemExit as e:
+            if e.code not in (None, 0):
+                raise AssertionError(
+                    f"train_wind_mvn.main exited with code {e.code} on the "
+                    f"sennen ERA5 smoke fixture"
+                ) from e
+    finally:
+        sys.argv = sys_argv
+
+    bundle_parent = smoke_root / "models" / "wind_direction" / SENNEN
+    versions = sorted([p for p in bundle_parent.iterdir() if p.is_dir()])
+    assert versions, f"no wind_mvn bundle written under {bundle_parent}"
+    return versions[-1]
+
+
+class TestTrainWindMvnSennenSmoke:
+    """Sennen contract: same bundle shape as bonehill, trained off the
+    ERA5 truth tree, stamped with the era5_cell DataSource, promoted under
+    the sennen station key."""
+
+    def test_bundle_has_state_and_sidecars(self, sennen_trained_bundle):
+        bundle = sennen_trained_bundle
+        for lead in SENNEN_LEADS:
+            assert (bundle / f"state_lead_{lead}h.pt").exists(), \
+                f"bundle missing state_lead_{lead}h.pt"
+        for name in ("feature_scaler.json", "feature_schema.json",
+                     "calibration.json", "training_metadata.json",
+                     "training_summary.json", "test_predictions.parquet"):
+            assert (bundle / name).exists(), f"bundle missing {name}"
+
+    def test_metadata_stamps_sennen_and_era5_truth(self, sennen_trained_bundle):
+        metadata = json.loads(
+            (sennen_trained_bundle / "training_metadata.json").read_text())
+        assert metadata["Phase"] == "wind_mvn"
+        assert metadata["LocationName"] == SENNEN
+        # The per-location truth source must be stamped — a bundle claiming
+        # Dunkeswell truth for sennen means load_truth dispatched wrong.
+        assert metadata["DataSource"] == "open_meteo_previous_runs+era5_cell", \
+            metadata["DataSource"]
+        for lead in SENNEN_LEADS:
+            entry = metadata["PerLead"][str(lead)]
+            assert entry["TrainRows"] > 0
+            assert entry["ValRows"] > 0
+            assert entry["TestRows"] > 0
+
+    def test_feature_schema_still_locks_29_features(self, sennen_trained_bundle):
+        # Neutral orography must NOT shrink the feature set — the zeroed
+        # oro columns are constant, not absent (the scaler's positional
+        # contract is location-independent).
+        schema = json.loads(
+            (sennen_trained_bundle / "feature_schema.json").read_text())
+        assert len(schema["FeatureNames"]) == 29, len(schema["FeatureNames"])
+
+    def test_manifest_promoted_under_sennen(self, sennen_trained_bundle):
+        smoke_root = sennen_trained_bundle.parents[3]
+        manifest = json.loads(
+            (smoke_root / "models" / "wind_direction" / "MANIFEST.json").read_text())
+        active = manifest["Stations"][SENNEN]["Active"]
+        assert any("_wind_mvn" in v for v in active), active

@@ -114,6 +114,7 @@ cd "$LOCAL_ROOT"
 need_forecasts=0
 need_rainfall=0
 need_midas=0
+need_era5_truth=0
 need_orographic=0
 need_marine=0
 need_waves_truth=0
@@ -167,11 +168,17 @@ for p in "${phases[@]}"; do
       fi ;;
 
     # Phase 2 wind_mvn (PyTorch MLP MVN). Forecasts + static orographic at
-    # BOTH modes. Train: Dunkeswell MIDAS truth (label) + wind_direction
+    # BOTH modes. Train: per-location truth label (must mirror
+    # train_wind_mvn.TRUTH_SOURCE_BY_LOCATION — Dunkeswell MIDAS for
+    # bonehill_rocks, the ERA5 cell tree for sennen_cove per the
+    # SENNEN_SEA_STATE_PLAN.md Phase 4 decision) + the wind_direction
     # MANIFEST. Predict: the latest wind_mvn bundle.
     wind_mvn)
       need_forecasts=1; need_orographic=1
-      if [ "$MODE" = "train" ]; then need_midas=1; need_wind_direction_manifest=1
+      if [ "$MODE" = "train" ]; then
+        need_wind_direction_manifest=1
+        if [ "$location" = "sennen_cove" ]; then need_era5_truth=1
+        else need_midas=1; fi
       else bundle_wind_direction="wind_mvn"; fi ;;
 
     # wind_speed_lgb (quantile-LGB + cross-conformal CQR, the Python port of
@@ -286,6 +293,18 @@ if [ "$need_waves_truth" -gt 0 ]; then
   echo "::endgroup::"
 fi
 
+# ERA5 cell truth (train label for sennen_cove wind_mvn). Hard-fail like
+# the MIDAS pull below — a missing truth tree means the trainer would
+# FileNotFoundError anyway, so surface it at pull time.
+if [ "$need_era5_truth" -gt 0 ]; then
+  echo "::group::sync_train_data: pull truth/era5/location=$location"
+  mkdir -p "truth/era5/location=$location"
+  rclone copy "${R2_SOURCE%/}/data/truth/era5/location=$location" \
+    "truth/era5/location=$location" \
+    --fast-list --transfers 16 --checkers 32 --s3-no-check-bucket
+  echo "::endgroup::"
+fi
+
 if [ "$need_midas" -gt 0 ]; then
   echo "::group::sync_train_data: pull truth/midas/raw"
   mkdir -p truth/midas/raw
@@ -370,6 +389,6 @@ pull_latest_bundle() {
 [ -n "$bundle_wave_height" ]      && pull_latest_bundle "wave_height"      "$bundle_wave_height"
 
 echo "sync_train_data: done (mode=$MODE)."
-echo "  forecasts=$need_forecasts rainfall=$need_rainfall midas=$need_midas orographic=$need_orographic"
+echo "  forecasts=$need_forecasts rainfall=$need_rainfall midas=$need_midas era5=$need_era5_truth orographic=$need_orographic"
 echo "  manifests: precip=$need_precip_manifest rainfall_amount=$need_rainfall_amount_manifest wind_direction=$need_wind_direction_manifest wind=$need_wind_manifest"
 echo "  bundles: precip='$bundle_precipitation' rainfall_amount='$bundle_rainfall_amount' wind_direction='$bundle_wind_direction' wind='$bundle_wind'"

@@ -1,0 +1,51 @@
+2026-06-12 00:02:07.979 +01:00 [INF] Render site: predictions [2026-05-12..2026-06-17], rolling 14d, output → data/site, locations=3
+2026-06-12 00:02:11.644 +01:00 [WRN] Predictions tree empty — temperature reads will return no rows.
+2026-06-12 00:02:11.685 +01:00 [INF] Loaded 0 temperature prediction rows (all locations).
+2026-06-12 00:02:11.742 +01:00 [WRN] Precipitation predictions tree empty — precip reads will return no rows.
+2026-06-12 00:02:11.780 +01:00 [WRN] Rainfall amount predictions tree empty — 3f reads will return no rows.
+2026-06-12 00:02:11.789 +01:00 [INF] Loaded 0 rainfall_amount prediction rows (all locations).
+2026-06-12 00:02:11.792 +01:00 [INF] Loaded 0 precipitation prediction rows (all locations).
+2026-06-12 00:02:11.848 +01:00 [WRN] Feels-like predictions tree empty or pre-Steadman — chip will be absent on home cards until predict runs once.
+2026-06-12 00:02:11.857 +01:00 [INF] Loaded 0 feels-like prediction rows (all locations).
+2026-06-12 00:02:11.914 +01:00 [WRN] Rock-surface predictions tree empty — chip + chart absent until predict runs once.
+2026-06-12 00:02:11.924 +01:00 [INF] Loaded 0 rock-surface prediction rows (all locations).
+2026-06-12 00:02:11.970 +01:00 [INF] Wind-gust predictions tree empty — pop-out gust suffix absent until predict runs.
+2026-06-12 00:02:11.976 +01:00 [INF] Loaded 0 wind-gust prediction rows (all locations).
+2026-06-12 00:02:12.034 +01:00 [INF] Wind predictions tree empty — per-lead wind page will empty-state until predict runs.
+2026-06-12 00:02:12.045 +01:00 [INF] Loaded 0 wind prediction rows (0 versions, all locations).
+2026-06-12 00:02:12.100 +01:00 [INF] wind_mvn (wind_direction) predictions tree empty — direction circles + speed CI ribbon will empty-state until predict-wind runs.
+2026-06-12 00:02:12.109 +01:00 [INF] Loaded 0 wind_mvn direction prediction rows (all locations).
+2026-06-12 00:02:12.197 +01:00 [INF] wave_height predictions tree empty — Sea state page will empty-state until predict-wave runs.
+2026-06-12 00:02:12.212 +01:00 [INF] Loaded 0 wave_height prediction rows (all locations).
+2026-06-12 00:02:12.360 +01:00 [WRN] Dry-window predictions tree empty — dry-window reads will return no rows.
+2026-06-12 00:02:12.376 +01:00 [INF] Loaded 0 dry-window prediction rows (all locations).
+2026-06-12 00:02:12.379 +01:00 [INF] Start-hour curves tree at data/predictions\dry_window_start_hour not present — chart will be absent until the next 3p predict cycle lands.
+2026-06-12 00:02:12.379 +01:00 [INF] Loaded 0 start-hour curve rows (all locations).
+2026-06-12 00:02:12.454 +01:00 [WRN] Met Office Spot tree empty — comparison line will be absent.
+2026-06-12 00:02:12.466 +01:00 [INF] Loaded 0 Met Office Spot forecast rows (all locations).
+2026-06-12 00:02:12.536 +01:00 [WRN] Per-NWP precipitation_probability tree empty — overlay panel will be absent.
+2026-06-12 00:02:12.610 +01:00 [WRN] Per-NWP precipitation rate tree empty — overlay panel will be absent.
+2026-06-12 00:02:12.677 +01:00 [WRN] Per-NWP temperature tree empty — overlay panel will be absent.
+2026-06-12 00:02:12.761 +01:00 [WRN] Forecast tree empty — low-cloud / mist warning will be absent.
+2026-06-12 00:02:12.777 +01:00 [INF] Loaded low-cloud / mist signal for 0 location-keyed inner dicts.
+2026-06-12 00:02:12.778 +01:00 [INF] Loaded 0 per-NWP precipitation-probability rows (0 models).
+2026-06-12 00:02:12.783 +01:00 [INF] Loaded 0 verify-history JSON sidecars.
+2026-06-12 00:02:12.796 +01:00 [INF] Loaded 0 dry-window conformal τ values across (version, lead).
+2026-06-12 00:02:12.802 +01:00 [INF] Loaded 0 precip conformal τ values across (station, version, lead).
+2026-06-12 00:02:12.898 +01:00 [INF] Phase map: 
+2026-06-12 00:02:12.920 +01:00 [INF] Champion (temperature) by station: (none)
+2026-06-12 00:02:12.920 +01:00 [INF] Champion (precipitation): (none)
+2026-06-12 00:02:13.141 +01:00 [INF] Loaded 0 model summaries / 0 feature-spec rows (all locations).
+2026-06-12 00:02:13.202 +01:00 [INF] Render bonehill_rocks (tabs: overview,temperature,rain,wind,dry_window,skill,models,element)
+2026-06-12 00:02:13.493 +01:00 [WRN] ERA5 tree empty — Temperature2m truth dict will be empty.
+2026-06-12 00:02:13.715 +01:00 [WRN] METAR tree empty for station EGTE — observation list will be empty.
+2026-06-12 00:02:13.948 +01:00 [WRN] Met Office obs tree empty — observation list will be empty.
+2026-06-12 00:02:17.046 +01:00 [INF] Render membury_devon (tabs: overview,temperature,rain,skill,models)
+2026-06-12 00:02:17.103 +01:00 [WRN] ERA5 tree empty — Temperature2m truth dict will be empty.
+2026-06-12 00:02:17.159 +01:00 [WRN] METAR tree empty for station EGTE — observation list will be empty.
+2026-06-12 00:02:17.217 +01:00 [WRN] Met Office obs tree empty — observation list will be empty.
+2026-06-12 00:02:18.469 +01:00 [INF] Render sennen_cove (tabs: overview,temperature,rain,sea_state,skill,models)
+2026-06-12 00:02:18.565 +01:00 [WRN] ERA5 tree empty — Temperature2m truth dict will be empty.
+2026-06-12 00:02:18.649 +01:00 [WRN] METAR tree empty for station EGDR — observation list will be empty.
+2026-06-12 00:02:18.752 +01:00 [WRN] Met Office obs tree empty — observation list will be empty.
+2026-06-12 00:02:20.388 +01:00 [INF] Site rendered → data/site (81 files across 3 locations + top-level)

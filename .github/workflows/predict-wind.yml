@@ -16,9 +16,10 @@ env:
 # predict-4a AND this workflow in parallel via Promise.allSettled, both
 # triggered by collect.yml's completion). No new hop — same trigger as 4a.
 #
-# predict_wind_mvn.py reads:
-#   - data/forecasts/location=bonehill_rocks (for the 29-feature live vector)
-#   - data/models/wind_direction/bonehill_rocks/{v_wind_mvn}/ (per-lead
+# predict_wind_mvn.py reads (per location — bonehill via the default/$LOC
+# steps, sennen_cove via its own block further down, 2026-06-12):
+#   - data/forecasts/location={location} (for the 29-feature live vector)
+#   - data/models/wind_direction/{location}/{v_wind_mvn}/ (per-lead
 #     state_lead_{24,48,72}h.pt + feature_scaler.json + calibration.json)
 # and writes:
 #   - data/predictions/wind_direction/{location}/model_version={v}_wind_mvn/
@@ -173,6 +174,37 @@ jobs:
           if [ -n "$ANCHOR" ]; then ARGS="$ARGS --anchor $ANCHOR"; fi
           python -u scripts/predict_wave_pi.py $ARGS
 
+      # ----- Sennen wind_mvn (direction) — rides this job (2026-06-12) -----
+      # Same pattern as the Sennen wave block above: the default/$LOC steps
+      # at the top cover Bonehill, so Sennen gets its own MODE=predict pull
+      # + run. The Sennen bundle is ERA5-truth-trained (see
+      # train_wind_mvn.TRUTH_SOURCE_BY_LOCATION) but predict-side it is the
+      # same forecast tree + oro JSON + bundle shape as Bonehill's — and
+      # ERA5 truth is a train-only label, so MODE=predict pulls nothing new.
+      - name: Pull Sennen wind predict data (sync_train_data.sh MODE=predict)
+        continue-on-error: true
+        env:
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          MODE=predict R2_SOURCE="r2:${R2_BUCKET}" \
+            PREDICT_PULL_ANCHOR="${{ github.event.inputs.anchor }}" \
+            bash scripts/sync_train_data.sh "sennen_cove" wind_mvn
+
+      - name: Run wind_mvn predict (Sennen)
+        # Soft-fail contract matches every predict step here: no Sennen
+        # *_wind_mvn bundle on R2 yet (pre-first-Sunday-retrain) → exit 3,
+        # masked; the wind_direction push below simply finds no Sennen
+        # subdir rows until one exists.
+        continue-on-error: true
+        env:
+          WEATHERBLEND_DATA_ROOT: ${{ github.workspace }}/../WeatherBlend/data
+          WB_LOCATION: sennen_cove
+        run: |
+          ANCHOR="${{ github.event.inputs.anchor }}"
+          ARGS="--location sennen_cove"
+          if [ -n "$ANCHOR" ]; then ARGS="$ARGS --anchor $ANCHOR"; fi
+          python -u scripts/predict_wind_mvn.py $ARGS
+
       - name: Push predictions to R2
         # wind_direction is a fresh prefix on first push — --s3-no-check-bucket
         # avoids the IAM-token CreateBucket gotcha.
@@ -189,6 +221,10 @@ jobs:
         env:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
+          # Tree layout: predictions/wind_direction/{location}/model_version=
+          # {v}_wind_mvn/date={d}/predictions.parquet — the '**/model_version='
+          # include below has the {location}/ parent segment, so ONE copy
+          # covers every location subdir (Bonehill + Sennen) in this tree.
           PRED_ROOT=../WeatherBlend/data/predictions/wind_direction
           if [ -d "$PRED_ROOT" ] && [ -n "$(find "$PRED_ROOT" -name '*.parquet' -print -quit 2>/dev/null)" ]; then
             rclone copy "$PRED_ROOT" \

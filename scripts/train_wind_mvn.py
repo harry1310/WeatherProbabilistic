@@ -7,8 +7,13 @@ parameterising a bivariate normal over the (u, v) wind decomposition,
 fit by NLL. The MLP gets both a direction estimate (atan2(-μ_u, -μ_v))
 and a speed magnitude (sqrt(μ_u² + μ_v²)).
 
-Truth: Dunkeswell SYNOP (MIDAS Open station 01383), available 2022-2024
-via the WeatherBlend ``data/truth/midas/raw/`` tree.
+Truth is per-location (see ``TRUTH_SOURCE_BY_LOCATION``):
+  - bonehill_rocks: Dunkeswell SYNOP (MIDAS Open station 01383), available
+    2022-2024 via the WeatherBlend ``data/truth/midas/raw/`` tree.
+  - sennen_cove: ERA5 at the Sennen cell (``data/truth/era5/location=
+    sennen_cove/date=*/data.parquet``, hourly WindSpeed10m m/s +
+    WindDirection10m degrees FROM-convention) — no usable nearby SYNOP;
+    decision recorded in WeatherBlend/docs/SENNEN_SEA_STATE_PLAN.md Phase 4.
 
 Per-lead artefact bundle::
 
@@ -127,8 +132,33 @@ log = logging.getLogger("train_wind_mvn")
 
 
 # ----------------------------------------------------------------------------
-# Dunkeswell MIDAS truth loader
+# Truth loaders — per-location source (Dunkeswell MIDAS SYNOP vs ERA5 cell)
 # ----------------------------------------------------------------------------
+# Both loaders return the SAME frame shape: one row per hourly ValidTimeUtc
+# (naive UTC datetime64) with wsp_ms (m/s) + wdir_deg (degrees, FROM
+# convention) — so build_features' (u, v) decomposition is source-agnostic.
+#
+# Unlisted locations fall back to Dunkeswell (the original behaviour) so
+# enabling a new location is an explicit registry edit, not an accident.
+TRUTH_SOURCE_BY_LOCATION = {
+    "bonehill_rocks": "dunkeswell_midas_synop",
+    # ERA5 truth decision for the exposed Sennen clifftop (2026-06-12) —
+    # see WeatherBlend/docs/SENNEN_SEA_STATE_PLAN.md Phase 4.
+    "sennen_cove": "era5_cell",
+}
+TRUTH_SOURCE_DEFAULT = "dunkeswell_midas_synop"
+
+
+def truth_source_for(location: str) -> str:
+    return TRUTH_SOURCE_BY_LOCATION.get(location, TRUTH_SOURCE_DEFAULT)
+
+
+def load_truth(location: str) -> pd.DataFrame:
+    """Dispatch to the location's truth loader (see TRUTH_SOURCE_BY_LOCATION)."""
+    if truth_source_for(location) == "era5_cell":
+        return load_era5_wind(location)
+    return load_dunkeswell()
+
 
 def parse_badc(path: Path) -> pd.DataFrame:
     t = path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -167,15 +197,57 @@ def load_dunkeswell(years: tuple[int, ...] = DUNKESWELL_YEARS) -> pd.DataFrame:
     return out
 
 
+def load_era5_wind(location: str) -> pd.DataFrame:
+    """ERA5 cell truth for locations with no usable nearby SYNOP station.
+
+    Reads ``data/truth/era5/location={loc}/date=*/data.parquet`` (the WB
+    Era5Client tree — hourly, multi-year backfill) and returns the SAME
+    frame shape as :func:`load_dunkeswell`: ValidTimeUtc + wsp_ms +
+    wdir_deg. ERA5 WindSpeed10m is already m/s (no knots conversion) and
+    WindDirection10m is FROM-convention like MIDAS, so the downstream
+    (u, v) decomposition is identical. No year clamp — unlike the MIDAS
+    files, the ERA5 tree only contains usable rows, so we take everything
+    that's been backfilled."""
+    era5_dir = WEATHERBLEND_DATA_ROOT / "truth" / "era5" / f"location={location}"
+    era5_glob = str(era5_dir / "date=*" / "data.parquet").replace("\\", "/")
+    con = duckdb.connect()
+    try:
+        df = con.execute(f"""
+            SELECT ValidTimeUtc, WindSpeed10m AS wsp_ms, WindDirection10m AS wdir_deg
+            FROM read_parquet('{era5_glob}')
+            WHERE WindSpeed10m IS NOT NULL
+              AND WindDirection10m IS NOT NULL
+        """).df()
+    except duckdb.IOException as e:
+        raise FileNotFoundError(
+            f"No ERA5 truth tree under {era5_dir} — did sync_train_data.sh "
+            f"pull truth/era5 for {location}?") from e
+    if df.empty:
+        raise FileNotFoundError(
+            f"ERA5 truth tree under {era5_dir} matched files but yielded "
+            f"zero non-null wind rows.")
+    # Defensive dedup: one file per date= partition means duplicates should
+    # not occur, but an overlapping re-backfill would silently fan out the
+    # truth join. Keep the last row per ValidTimeUtc.
+    out = (df.drop_duplicates(subset=["ValidTimeUtc"], keep="last")
+             .sort_values("ValidTimeUtc").reset_index(drop=True))
+    log.info("Loaded %d ERA5 cell truth points for %s (%s -> %s).",
+             len(out), location,
+             out["ValidTimeUtc"].iloc[0], out["ValidTimeUtc"].iloc[-1])
+    return out
+
+
 # ----------------------------------------------------------------------------
 # Forecast pivot + feature build
 # ----------------------------------------------------------------------------
 
-def build_features(location: str, lead: int, dunk: pd.DataFrame,
+def build_features(location: str, lead: int, truth: pd.DataFrame,
                    oro: dict) -> pd.DataFrame:
     """Pull forecast tree at the given lead for the 6 production NWPs,
-    pivot into per-NWP columns, derive ORO + SPREAD, merge with Dunkeswell
-    truth. Returns one row per ValidTimeUtc with the 29-feature vector +
+    pivot into per-NWP columns, derive ORO + SPREAD, merge with the
+    location's truth frame (Dunkeswell SYNOP or ERA5 cell — both arrive
+    as ValidTimeUtc/wsp_ms/wdir_deg, see the truth-loader section).
+    Returns one row per ValidTimeUtc with the 29-feature vector +
     (u, v) truth columns."""
     fc_glob = str(WEATHERBLEND_DATA_ROOT / "forecasts"
                   / f"location={location}" / "**" / "*.parquet").replace("\\", "/")
@@ -255,9 +327,9 @@ def build_features(location: str, lead: int, dunk: pd.DataFrame,
         df[f"{label}_std"]  = df[src_cols].std(axis=1, skipna=True)
         spread_names.extend([f"{label}_mean", f"{label}_std"])
 
-    # Merge truth + decompose into (u, v). Dunkeswell wdir is FROM convention,
-    # so u = -wsp · sin(dir), v = -wsp · cos(dir).
-    df = df.merge(dunk, on="ValidTimeUtc", how="inner").dropna(
+    # Merge truth + decompose into (u, v). Both truth sources report wdir
+    # in FROM convention, so u = -wsp · sin(dir), v = -wsp · cos(dir).
+    df = df.merge(truth, on="ValidTimeUtc", how="inner").dropna(
         subset=["wsp_ms", "wdir_deg"]).reset_index(drop=True)
     df["u_truth"] = -df["wsp_ms"] * np.sin(np.radians(df["wdir_deg"]))
     df["v_truth"] = -df["wsp_ms"] * np.cos(np.radians(df["wdir_deg"]))
@@ -482,7 +554,8 @@ def calibrate_blend(lgb_val: np.ndarray | None,
 # ----------------------------------------------------------------------------
 
 def write_bundle(out_dir: Path, location: str, version: str,
-                 per_lead: dict, feature_names: list[str]) -> None:
+                 per_lead: dict, feature_names: list[str],
+                 truth_source: str = TRUTH_SOURCE_DEFAULT) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # 1) Per-lead model state.
@@ -579,7 +652,7 @@ def write_bundle(out_dir: Path, location: str, version: str,
         "Target":        TARGET,
         "Phase":         PHASE,
         "LocationName":  location,
-        "DataSource":    "open_meteo_previous_runs+dunkeswell_midas_synop",
+        "DataSource":    f"open_meteo_previous_runs+{truth_source}",
         "TrainedAtUtc":  datetime.now(timezone.utc).isoformat(),
         "Hyperparameters": {
             "library":         f"torch=={torch.__version__}",
@@ -638,7 +711,7 @@ def train_one_location(location: str, version: str,
     """Train wind_mvn for one location across all configured leads.
     Returns 0 on success, nonzero on guard failure / no rows."""
     oro = load_oro_static(location)
-    dunk = load_dunkeswell()
+    truth = load_truth(location)
 
     # 1) Build per-lead datasets; gather rows + feature ordering.
     per_lead_data: dict[int, dict] = {}
@@ -648,7 +721,7 @@ def train_one_location(location: str, version: str,
 
     for lead in leads:
         log.info("[%s] %s lead %dh — loading", time.strftime("%H:%M:%S"), location, lead)
-        df = build_features(location, lead, dunk, oro)
+        df = build_features(location, lead, truth, oro)
         if df.empty:
             log.warning("  zero rows for %s lead %dh — skipping cell.", location, lead)
             continue
@@ -820,7 +893,8 @@ def train_one_location(location: str, version: str,
         return 4
 
     # 4) Write bundle + promote.
-    write_bundle(bundle_dir, location, version, per_lead_out, feature_names)
+    write_bundle(bundle_dir, location, version, per_lead_out, feature_names,
+                 truth_source=truth_source_for(location))
     log.info("Bundle → %s", bundle_dir)
     promote_station_version(
         models_root=models_root,

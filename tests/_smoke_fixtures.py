@@ -424,6 +424,48 @@ def make_dunkeswell_midas_truth(
     return midas_root
 
 
+def make_era5_wind_truth(
+    root: Path,
+    location: str,
+    start: datetime,
+    n_days: int,
+    *,
+    rng: np.random.Generator | None = None,
+) -> Path:
+    """Write ``data/truth/era5/location={loc}/date=YYYY-MM-DD/data.parquet``
+    files matching the WB Era5Client truth layout — the wind_mvn truth
+    source for sennen_cove (2026-06-12). Only the columns
+    ``train_wind_mvn.load_era5_wind`` reads (ValidTimeUtc, WindSpeed10m,
+    WindDirection10m) plus LocationName are emitted; production files
+    carry ~32 columns, all ignored by the loader's explicit SELECT.
+
+    Signal recipe mirrors :func:`make_dunkeswell_midas_truth` (slow
+    direction sweep + bounded speed walk) but values are already m/s —
+    the ERA5 path has no knots conversion."""
+    rng = rng or np.random.default_rng(seed=2026_06_12)
+    base = root / "truth" / "era5" / f"location={location}"
+    n_hours = n_days * 24
+    base_dir = (np.linspace(0, 360, n_hours, endpoint=False)
+                + rng.normal(0.0, 8.0, size=n_hours)) % 360.0
+    base_spd_ms = np.clip(
+        6.0 + 3.0 * np.sin(np.linspace(0, 4 * np.pi, n_hours))
+        + rng.normal(0.0, 1.0, size=n_hours),
+        0.3, 30.0,
+    )
+    for d in range(n_days):
+        day = (start + timedelta(days=d)).replace(hour=0)
+        idx = slice(d * 24, (d + 1) * 24)
+        day_dir = base / f"date={day.date().isoformat()}"
+        day_dir.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({
+            "LocationName": location,
+            "ValidTimeUtc": [day + timedelta(hours=h) for h in range(24)],
+            "WindSpeed10m": base_spd_ms[idx],
+            "WindDirection10m": base_dir[idx],
+        }).to_parquet(day_dir / "data.parquet", index=False)
+    return base
+
+
 # --------------------------------------------------------------------------
 # Static orographic JSON — wind_mvn (and 4a synoptic-feature lookups)
 # --------------------------------------------------------------------------
@@ -617,3 +659,117 @@ def _ea_slug(friendly_name: str) -> str:
     module import-light (no src.* side effects)."""
     bare = "_".join(friendly_name.lower().split())
     return f"ea_{bare}"
+
+
+# --------------------------------------------------------------------------
+# Sennen sea-state fixtures (wave_height_lgb smoke, 2026-06-12)
+# --------------------------------------------------------------------------
+
+WAVE_MODELS = ("meteofrance_wave", "ecmwf_wam025", "gwam", "ewam", "ncep_gfswave025")
+WAVE_BEST = "best_match"
+
+
+def make_marine_tree(
+    data_root: Path,
+    location: str,
+    start: datetime,
+    n_days: int,
+    kind: str = "hist_forecast",
+    rng: np.random.Generator | None = None,
+) -> None:
+    """Synthetic marine (wave) forecast tree matching the WB MarineClient
+    writers. ``kind`` picks the file flavour the wave scripts read:
+    ``hist_forecast`` (train features: hist_forecast.parquet per valid-date,
+    RunTimeSource=hist_forecast, lead-unlabelled) or ``live`` (predict
+    features: run=00.parquet per run-date, RunTimeSource=synthesised, each
+    run covering 7 forecast days).
+
+    Hs follows a shared seasonal+stormy signal with per-model noise so the
+    blend has something real to regress; best_match additionally carries the
+    site extras (tide / SST / secondary swell) like production.
+    """
+    rng = rng or np.random.default_rng(seed=2026_06_12)
+    base = data_root / "marine" / f"location={location}"
+
+    def day_rows(model: str, day: datetime, run_time: datetime, source: str,
+                 hours: int) -> "pd.DataFrame":
+        valid = [day + timedelta(hours=h) for h in range(hours)]
+        t = np.array([(v - start).total_seconds() / 86400 for v in valid])
+        signal = 1.6 + 0.9 * np.sin(2 * np.pi * t / 14) + 0.4 * np.sin(2 * np.pi * t / 3.1)
+        hs = np.clip(signal + rng.normal(0, 0.25, len(valid)), 0.05, None)
+        period = np.clip(7 + 2.5 * np.sin(2 * np.pi * t / 9) + rng.normal(0, 0.6, len(valid)), 2, None)
+        direction = (270 + 40 * np.sin(2 * np.pi * t / 11) + rng.normal(0, 12, len(valid))) % 360
+        is_best = model == WAVE_BEST
+        return pd.DataFrame({
+            "LocationName": location,
+            "Model": model,
+            "RunTimeUtc": run_time,
+            "ValidTimeUtc": valid,
+            "LeadHours": [int((v - run_time).total_seconds() // 3600) if source == "synthesised" else 0
+                          for v in valid],
+            "RunTimeSource": source,
+            "WaveHeight": hs,
+            "WavePeriod": period,
+            "WaveDirection": direction,
+            "WindWaveHeight": np.clip(hs * 0.3 + rng.normal(0, 0.1, len(valid)), 0, None),
+            "WindWavePeriod": period * 0.5,
+            "WindWaveDirection": direction,
+            "SwellWaveHeight": np.clip(hs * 0.8 + rng.normal(0, 0.1, len(valid)), 0, None),
+            "SwellWavePeriod": period * 1.3,
+            "SwellWaveDirection": direction,
+            "SecondarySwellWaveHeight": (hs * 0.15) if is_best else np.nan,
+            "SecondarySwellWavePeriod": (period * 1.6) if is_best else np.nan,
+            "SecondarySwellWaveDirection": direction if is_best else np.nan,
+            "SeaLevelHeightMsl": (2.2 * np.sin(2 * np.pi * t * 24 / 12.42)) if is_best else np.nan,
+            "SeaSurfaceTemperature": (12.5 + 2 * np.sin(2 * np.pi * t / 180)) if is_best else np.nan,
+        })
+
+    for model in (*WAVE_MODELS, WAVE_BEST):
+        if kind == "hist_forecast":
+            for d in range(n_days):
+                day = start + timedelta(days=d)
+                day_dir = base / f"model={model}" / f"date={day:%Y-%m-%d}"
+                day_dir.mkdir(parents=True, exist_ok=True)
+                day_rows(model, day, run_time=day, source="hist_forecast", hours=24) \
+                    .to_parquet(day_dir / "hist_forecast.parquet", index=False)
+        else:
+            # One live run per day at 00Z, each covering 7 forecast days —
+            # predict picks the lexicographically newest, like production.
+            for d in range(n_days):
+                run = start + timedelta(days=d)
+                day_dir = base / f"model={model}" / f"date={run:%Y-%m-%d}"
+                day_dir.mkdir(parents=True, exist_ok=True)
+                day_rows(model, run, run_time=run, source="synthesised", hours=7 * 24) \
+                    .to_parquet(day_dir / "run=00.parquet", index=False)
+
+
+def make_wave_truth_tree(
+    data_root: Path,
+    location: str,
+    start: datetime,
+    n_days: int,
+    rng: np.random.Generator | None = None,
+) -> None:
+    """era5_ocean wave truth matching the WB WriteWaveTruthAsync layout —
+    the same shared signal as make_marine_tree (different noise draw) so the
+    fixture blend genuinely has signal to find."""
+    rng = rng or np.random.default_rng(seed=2026_06_13)
+    base = data_root / "truth" / "waves" / f"location={location}" / "source=era5_ocean"
+    for d in range(n_days):
+        day = start + timedelta(days=d)
+        valid = [day + timedelta(hours=h) for h in range(24)]
+        t = np.array([(v - start).total_seconds() / 86400 for v in valid])
+        signal = 1.6 + 0.9 * np.sin(2 * np.pi * t / 14) + 0.4 * np.sin(2 * np.pi * t / 3.1)
+        day_dir = base / f"date={day:%Y-%m-%d}"
+        day_dir.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({
+            "LocationName": location,
+            "Source": "era5_ocean",
+            "ValidTimeUtc": valid,
+            "WaveHeight": np.clip(signal + rng.normal(0, 0.12, 24), 0.05, None),
+            "WavePeriod": 7 + 2.5 * np.sin(2 * np.pi * t / 9),
+            "WaveDirection": (270 + 40 * np.sin(2 * np.pi * t / 11)) % 360,
+            "PeakPeriod": np.nan,
+            "DirectionalSpread": np.nan,
+            "SeaSurfaceTemperature": np.nan,
+        }).to_parquet(day_dir / "data.parquet", index=False)

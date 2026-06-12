@@ -182,6 +182,35 @@ def test_predict_mode_survives_cells_without_the_phase(tmp_path):
     assert not any("ea_zzz_sennen_no_4a" in s for s in f), f
 
 
+def test_train_mode_wind_mvn_truth_is_per_location(tmp_path):
+    """wind_mvn's train label is per-location (the 2026-06-12 Sennen ERA5
+    decision, SENNEN_SEA_STATE_PLAN.md Phase 4): sennen_cove pulls the ERA5
+    cell tree and NOT MIDAS; bonehill_rocks keeps MIDAS and pulls no ERA5.
+    The declaration must mirror train_wind_mvn.TRUTH_SOURCE_BY_LOCATION."""
+    root = tmp_path / "r2"; d = root / "data"
+    for loc in ("bonehill_rocks", "sennen_cove"):
+        _touch(d / f"forecasts/location={loc}/model=gfs_seamless/date=2026-01-01/run=00.parquet")
+        _touch(d / f"static/orographic/{loc}.json")
+        _touch(d / f"truth/era5/location={loc}/date=2026-01-01/data.parquet")
+    _touch(d / "truth/midas/raw/midas-open_x_01383_y.csv")
+    _touch(d / "models/wind_direction/MANIFEST.json")
+
+    dest_sennen = tmp_path / "dest_sennen"
+    run_sync_train_data(location="sennen_cove", phases="wind_mvn",
+                        r2_source=root, local_root=dest_sennen, mode="train")
+    f = _files(dest_sennen)
+    assert any(s.startswith("truth/era5/location=sennen_cove/") for s in f), f
+    assert not any(s.startswith("truth/midas/") for s in f), f
+    assert any(s.endswith("wind_direction/MANIFEST.json") for s in f), f
+
+    dest_bonehill = tmp_path / "dest_bonehill"
+    run_sync_train_data(location="bonehill_rocks", phases="wind_mvn",
+                        r2_source=root, local_root=dest_bonehill, mode="train")
+    fb = _files(dest_bonehill)
+    assert any(s.startswith("truth/midas/") for s in fb), fb
+    assert not any(s.startswith("truth/era5/") for s in fb), fb
+
+
 def test_train_mode_wind_speed_lgb_pulls_wind_manifest_and_midas(tmp_path):
     """Train-mode inverse: wind_speed_lgb pulls the wind MANIFEST (promote
     target) + MIDAS truth, and no model bundle (train mints fresh)."""

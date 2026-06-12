@@ -81,11 +81,15 @@ def find_latest_bundle(models_root: Path, location: str) -> Path:
     raise FileNotFoundError(f"No usable *_wave_height_lgb bundle under {parent}.")
 
 
-def load_latest_live(location: str) -> pd.DataFrame:
+def load_latest_live(location: str, ref_time: pd.Timestamp) -> pd.DataFrame:
     """Freshest live run per model from the marine tree, pivoted wide per
     ValidTimeUtc. Live files are run=HH.parquet under date=<run date>;
     'freshest' = lexicographically max (date, run) per model — the same
-    newest-run-wins rule the weather predict pulls use."""
+    newest-run-wins rule the weather predict pulls use.
+
+    ``ref_time`` anchors the staleness check: wall-clock 'now' on live
+    cycles, the --anchor on retro-dated dispatches and the smoke fixtures
+    (a wall-clock check would skip every model in an anchored replay)."""
     base = WEATHERBLEND_DATA_ROOT.as_posix()
     con = duckdb.connect()
     wide = None
@@ -110,7 +114,7 @@ def load_latest_live(location: str) -> pd.DataFrame:
         if sub.empty:
             continue
         run_time = pd.Timestamp(sub["RunTimeUtc"].max())
-        age_h = (pd.Timestamp.utcnow().tz_localize(None) - run_time).total_seconds() / 3600
+        age_h = (ref_time - run_time).total_seconds() / 3600
         if age_h > 36:
             log.warning("  %s: freshest live run is %.0fh old — stale, skipping model.", m, age_h)
             continue
@@ -136,7 +140,8 @@ def load_latest_live(location: str) -> pd.DataFrame:
 
 
 def predict_for_location(location: str, anchor: datetime,
-                         models_root: Path, predictions_root: Path) -> int:
+                         models_root: Path, predictions_root: Path,
+                         anchored: bool = False) -> int:
     bundle = find_latest_bundle(models_root, location)
     version = bundle.name
     log.info("Using bundle %s", bundle)
@@ -148,7 +153,14 @@ def predict_for_location(location: str, anchor: datetime,
         "feature_schema.json order != predict-side feature_columns() — train/predict drift"
     conformal_q = float(calibration["conformal_q"])
 
-    df = load_latest_live(location)
+    # Reference instant for staleness + LeadHours: wall-clock on live cycles;
+    # the anchor's midnight on retro-dated runs (otherwise the wall clock
+    # makes every replayed run "stale" and every replayed hour LeadHours<0 —
+    # an anchored dispatch would silently emit nothing).
+    now_naive = datetime.now(timezone.utc).replace(microsecond=0, tzinfo=None)
+    ref_naive = anchor.replace(tzinfo=None) if anchored else now_naive
+
+    df = load_latest_live(location, pd.Timestamp(ref_naive))
     if df.empty:
         log.error("No live marine rows for %s — exit 3.", location)
         return 3
@@ -173,14 +185,15 @@ def predict_for_location(location: str, anchor: datetime,
     hi = qhi.predict(X) + conformal_q
 
     made_at = datetime.now(timezone.utc).replace(microsecond=0)
-    made_naive = made_at.replace(tzinfo=None)
     out = pd.DataFrame({
         "LocationName": location,
         "Element": TARGET,
         "ModelVersion": version,
+        # Provenance stays the real wall-clock instant even on anchored
+        # replays; only LeadHours + the past-hours filter use ref_naive.
         "PredictionMadeAtUtc": made_at,
         "ValidTimeUtc": df.index,
-        "LeadHours": [int(round((pd.Timestamp(v) - made_naive).total_seconds() / 3600))
+        "LeadHours": [int(round((pd.Timestamp(v) - ref_naive).total_seconds() / 3600))
                       for v in df.index],
         "BlendValue": q50,
         "BandLoM": lo,
@@ -230,7 +243,8 @@ def main() -> None:
 
     log.info("wave_height_lgb — PREDICT")
     sys.exit(predict_for_location(args.location, anchor,
-                                  Path(args.models_root), Path(args.predictions_root)))
+                                  Path(args.models_root), Path(args.predictions_root),
+                                  anchored=args.anchor is not None))
 
 
 if __name__ == "__main__":
