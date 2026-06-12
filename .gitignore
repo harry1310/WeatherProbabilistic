@@ -19,3 +19,5 @@ data/cache/
 # until the bundle grows enough to warrant LFS or an R2-side artefact store.
 !reports/phase4_artefacts/bayesian_predictions/posteriors/*.nc
 
+
+logs/
