@@ -55,11 +55,20 @@ Outputs land in `reports/`.
 ## Tests
 
 ```bash
+# Fast inner loop — unit tests only, skips the model-training smokes (~1 min):
+.venv/Scripts/python.exe -m pytest tests/ -m "not slow"
+
+# Full run incl. the integration smokes — the pre-push gate (slow):
 .venv/Scripts/python.exe -m pytest tests/
+.venv/Scripts/python.exe -m pytest tests/ -n auto      # parallel (cap -n 4 if it swaps)
 ```
 
-59 tests covering the isotonic calibration module + the Phase 5
-simulation core + aggregations.
+Every `test_smoke_*` test (NGBoost / BART / PyTorch MVN / LightGBM CQR trained
+end to end) is auto-tagged `slow` by `conftest.py` — they catch integration
+wiring bugs, so a plain `pytest tests/` still runs them; `-m "not slow"` is the
+fast inner loop. `pytest-xdist` (`-n auto`) parallelises the slow lane; each
+worker is a separate process and the trainers are memory-hungry, so cap `-n` on
+a small-RAM box. The `--run-parity` C#↔Python contract test stays opt-in.
 
 ## Data
 

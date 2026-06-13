@@ -66,3 +66,12 @@ lightgbm>=4.6,<5.0
 # so production CI doesn't install them. predict_4a imports its shared
 # helpers from scripts/_shared.py rather than transitively pulling in the
 # bake-off module.
+
+# --- Test tooling ---
+# pytest + xdist for the local test suite (tests run locally only, no test CI).
+# xdist parallelises the slow model-training smokes: `pytest -n auto` (or a
+# capped `-n 4` — each worker is a separate process and the heavy trainers
+# are memory-hungry, so on the 7.8 GB dev box uncapped `auto` can swap). The
+# fast inner loop is `pytest -m "not slow"` (no xdist needed, ~1-2 min).
+pytest>=8.0
+pytest-xdist>=3.5

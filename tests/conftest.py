@@ -26,9 +26,26 @@ def pytest_configure(config):
         "markers",
         "parity: slow C#↔Python bit-parity contract test (opt-in via --run-parity)",
     )
+    config.addinivalue_line(
+        "markers",
+        "slow: model-training integration smoke (every test_smoke_* test is "
+        "auto-tagged). Default `pytest tests/` still runs them; for the fast "
+        "inner loop run `pytest -m \"not slow\"`.",
+    )
 
 
 def pytest_collection_modifyitems(config, items):
+    # Auto-tag every test in a test_smoke_*.py module as `slow` so the inner
+    # loop can `-m "not slow"` without dropping coverage from a plain run.
+    # These train real models (NGBoost / BART / PyTorch MVN / LightGBM CQR) end
+    # to end — they catch integration wiring bugs, so they stay ON by default
+    # and are the pre-push gate, mirroring WeatherBlend's [Category=Smoke] split.
+    for item in items:
+        # nodeid starts with the file path, e.g. "tests/test_smoke_3f.py::..."
+        # — robust whether or not tests/ is an importable package.
+        if "test_smoke_" in item.nodeid.split("::", 1)[0].rsplit("/", 1)[-1]:
+            item.add_marker(pytest.mark.slow)
+
     if config.getoption("--run-parity"):
         return
     skip = pytest.mark.skip(
