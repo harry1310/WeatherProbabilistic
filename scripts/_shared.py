@@ -860,3 +860,38 @@ def add_synoptic_features(station_friendly: str, lead_hours: int,
     con.close()
     df = df.merge(syn, on="ValidTimeUtc", how="left")
     return df, ["wind_dir_sin_mean", "wind_dir_cos_mean", "surface_pressure_mean"]
+
+
+# ---------------------------------------------------------------------------
+# 4a collapse guard (2026-06-17) — lives here (R-free) so it's unit-testable
+# without rpy2/dbarts. See predict_4a.predict_one_cell for the call site.
+# ---------------------------------------------------------------------------
+
+# When a warm scaffold's ntree disagrees with the saved dbarts state, setState
+# silently no-ops and predict() returns the training base rate y_train.mean()
+# for EVERY row — a flat line equal to climatology (the 2026-05-10 prod bug).
+COLLAPSE_MIN_ROWS = 6      # too few rows to judge flatness → never flag
+COLLAPSE_FLAT_PTP = 1e-6   # peak-to-peak below this == "flat"
+COLLAPSE_MATCH_ABS = 1e-6  # flat value this close to base rate == "climatology"
+
+
+def climatology_collapse_reason(p_mean, base_rate: float):
+    """Return a human reason string if the per-row P(wet) vector `p_mean` has
+    collapsed to climatology (the dbarts round-trip failure mode), else None.
+
+    Collapse signature: every row carries the identical training base rate
+    `y_train.mean()`. We require BOTH that the vector is flat (peak-to-peak
+    below COLLAPSE_FLAT_PTP) AND that the flat value equals the base rate
+    (within COLLAPSE_MATCH_ABS), so a genuinely flat-but-real forecast that
+    doesn't happen to sit on the base rate is never falsely flagged. Vectors
+    with fewer than COLLAPSE_MIN_ROWS rows can't be judged → never flagged.
+    """
+    p = np.asarray(p_mean, dtype="float64").ravel()
+    if p.shape[0] < COLLAPSE_MIN_ROWS:
+        return None
+    ptp = float(np.ptp(p))
+    mean = float(p.mean())
+    if ptp < COLLAPSE_FLAT_PTP and abs(mean - base_rate) < COLLAPSE_MATCH_ABS:
+        return (f"all {p.shape[0]} rows flat at {mean:.6f} (ptp {ptp:.2e}) "
+                f"== training base rate {base_rate:.6f}")
+    return None

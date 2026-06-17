@@ -80,6 +80,7 @@ from _shared import (  # noqa: E402
     MODELS_LEAN,
     add_calendar_features,
     build_rich_oro_features_live,
+    climatology_collapse_reason,
     compose_precip_aggregates,
     lead_day_bucket,
     resolve_station,
@@ -282,6 +283,20 @@ def predict_one_cell(bundle_dir: Path, lead: int, df_lead: pd.DataFrame,
           f"draws shape {p_draws.shape}", flush=True)
 
     p_mean = p_draws.mean(axis=0)
+
+    # Collapse guard: a healthy BART varies its P(wet) across the hours of a
+    # lead; a scaffold/ntree round-trip failure makes dbarts return the base
+    # rate y_train.mean() for every row (flat == climatology). Fail loudly
+    # rather than write a flat-climatology cell that looks plausible.
+    collapse = climatology_collapse_reason(p_mean, float(y_train.mean()))
+    if collapse is not None:
+        raise ValueError(
+            f"4a cell {bundle_dir.name} lead {lead}h COLLAPSED to climatology: "
+            f"{collapse}. Almost always a dbarts state/ntree round-trip failure "
+            f"(warm scaffold ntree {warm_ntree} vs saved state). Refusing to "
+            f"write — retrain or fix the bundle's preprocess.json ntree."
+        )
+
     q05 = np.quantile(p_draws, 0.05, axis=0)
     q10 = np.quantile(p_draws, 0.10, axis=0)
     q50 = np.quantile(p_draws, 0.50, axis=0)
