@@ -278,6 +278,11 @@ jobs:
         if: steps.gate.outputs.proceed == 'true' && steps.phases.outputs.phases_resolved_csv != ''
         with:
           python-version: "3.12"
+          # Cache the ~1 GB of pip wheels keyed on requirements.txt. The location
+          # matrix is SERIAL (max-parallel: 1), so the cache job 1 writes is restored
+          # by jobs 2/3 (and across runs) — they install from cache instead of
+          # re-downloading the wheels each time (2026-06-21, per-location waste fix).
+          cache: 'pip'
 
       # R is needed by 4a (dbarts). Only installed when 4a runs.
       - name: Install R
