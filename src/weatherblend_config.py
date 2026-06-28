@@ -67,6 +67,18 @@ def _ea_slug(friendly_name: str) -> str:
     return f"ea_{bare}"
 
 
+def _slug(s: dict) -> str:
+    """Source-aware station slug — mirrors C# ``RainfallStationConfig.Slug``:
+    ``wl_<name>`` for WeatherLink-sourced gauges, ``ea_<name>`` otherwise.
+
+    Fixes the 4a-retrain break (2026-06-28): Manaton is ``source: weatherlink``,
+    so its orographic static is ``wl_manaton.json`` — the old hardcoded ``ea_``
+    prefix looked for the non-existent ``ea_manaton.json`` and crashed."""
+    if (s.get("source") or "ea").strip().lower() == "weatherlink":
+        return "wl_" + "_".join(s["name"].lower().split())
+    return _ea_slug(s["name"])
+
+
 def _candidate_paths() -> list[Path]:
     env = os.environ.get("WEATHERBLEND_CONFIG")
     paths: list[Path] = []
@@ -98,9 +110,13 @@ def _parse(doc: dict) -> tuple[Location, ...]:
     for entry in locs_raw:
         stations_raw = (entry.get("rainfall") or {}).get("stations") or []
         stations = tuple(
-            Station(slug=_ea_slug(s["name"]), name=s["name"])
+            Station(slug=_slug(s), name=s["name"])
             for s in stations_raw
-            if "name" in s
+            # Pool-only gauges (Princetown, Manaton) feed ONLY the WeatherBlend C# 3o pool as
+            # training augmentation — they are never a per-station product. WP's models (4a is
+            # per-station, Bonehill-only) must not see them, or they try to build a model + load
+            # an oro static for a non-product gauge (the Manaton wl_/ea_ mismatch that crashed 4a).
+            if "name" in s and not s.get("poolOnly", False)
         )
         locs.append(Location(
             name=entry["name"],
